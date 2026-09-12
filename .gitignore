@@ -1,0 +1,25 @@
+# 依赖与产物
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# Android 构建产物（原生工程本身要提交，构建出来的不要）
+android/.gradle/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/
+android/local.properties
+android/app/release/
+android/app/debug/
+*.apk
+*.aab
+*.keystore
+*.jks
+keystore.properties
+
+# 编辑器
+.idea/
+.vscode/
+*.iml
