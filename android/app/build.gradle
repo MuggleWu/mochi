@@ -7,8 +7,10 @@ android {
         applicationId "com.mugglewu.mochi"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "0.1.0"
+        // 与 package.json 的 version 手工对齐（Capacitor 不会自动同步这两个值）。
+        // versionCode 每次出包必须递增，否则新包装不上（Android 会拒绝降级安装）。
+        versionCode 2
+        versionName "0.2.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
