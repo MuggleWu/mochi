@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">mochi</string>
+    <string name="title_activity_main">mochi</string>
+    <string name="package_name">com.mugglewu.mochi</string>
+    <string name="custom_url_scheme">com.mugglewu.mochi</string>
+</resources>
