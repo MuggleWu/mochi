@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { visibleWindow } from './virtual';
 import { useNotes } from './store';
 import { displayTitle } from '@core/paths';
+import { drawerProgress } from './edge-swipe';
 
 const ROW_H = 56;
 
@@ -28,9 +29,24 @@ export function Drawer(): React.JSX.Element {
   const current = useNotes((s) => s.current);
   const meta = useNotes((s) => s.meta);
   const openNote = useNotes((s) => s.openNote);
+
+  const offset = useNotes((s) => s.drawerOffset);
+  const setDrawerWidth = useNotes((s) => s.setDrawerWidth);
+  const width = useNotes((s) => s.drawerWidth);
+  /** 拖动中（有偏移且抽屉开着）= 手指正在跟手，此时要关掉过渡 */
+  const dragging = offset !== null && open;
   const createNote = useNotes((s) => s.createNote);
 
+  const panelRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // CSS 里宽度是 min(84%, 380px)，JS 侧也有一份公式（手势开始时抽屉还没挂载、量不到）。
+  // 挂载后实测一次，两边以后不会因为改 CSS 而悄悄错位。
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    setDrawerWidth(el.getBoundingClientRect().width);
+  }, [open, setDrawerWidth]);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(600);
 
@@ -56,8 +72,17 @@ export function Drawer(): React.JSX.Element {
 
   return (
     <>
-      <div className={`scrim ${open ? 'open' : ''}`} onClick={() => setDrawer(false)} />
-      <aside className={`drawer ${open ? 'open' : ''}`} aria-hidden={!open}>
+      <div
+        className={`scrim ${open ? 'open' : ''}`}
+        style={dragging ? { opacity: drawerProgress(offset, width) } : undefined}
+        onClick={() => setDrawer(false)}
+      />
+      <aside
+        className={`drawer ${open ? 'open' : ''}${dragging ? ' dragging' : ''}`}
+        ref={panelRef}
+        aria-hidden={!open}
+        style={offset === null ? undefined : { transform: `translateX(${offset}px)` }}
+      >
         <div className="head">
           <input
             type="search"

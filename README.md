@@ -77,6 +77,39 @@ cp android/app/build/outputs/apk/debug/app-debug.apk ../mochi-产物/mochi-lates
 
 归档前**核对 APK 里确实是当前代码**：分包后的 JS 直接在 `assets/public/assets/*.js`，可以用 `unzip -p <apk> <该文件> | grep <刚改的标识符>` 确认。踩过一次坑——图标改完就出包归档，结果那份 APK 里没有同批的同步优化代码。
 
+## 系统栏与键盘（改 Android 工程前先看）
+
+`env(safe-area-inset-*)` 在 Android 上**不是可靠来源**：只有「WebView 较新 + 页面带
+`viewport-fit=cover`」时才有值，老 WebView 一律是 0。Android 15+ 起系统又强制边到边，
+窗口不再随输入法收缩，`windowSoftInputMode="adjustResize"` 在边到边窗口上等于失效。
+两个机制各自失效的那一格，内容就会压进状态栏与导航栏（真机反馈过这个现象）。
+
+现在三处配合解决：
+
+- `src/ui/styles.css` 的 `--inset-*` 取三者**最大值**：`env()`、Capacitor 注入的
+  `--safe-area-inset-*`、以及 `MainActivity` 兜底注入的 `--native-inset-*`。三者只在
+  "该由网页自己留白"时才是同一个真值，取 max 不会叠加。
+- `MainActivity` 读真实窗口内边距并注入上面那个变量，**已经被原生留过白的方向发 0**；
+  排这类问题用 `adb logcat -s mochi-insets`，日志里有「系统报了多少 / 原生补了多少 /
+  发给网页多少」三个数。
+- 底部留白**只认一个来源** `--bottom-blocked: max(--kb, --inset-bottom)` —— 键盘和导航栏
+  不会同时占位，所以取 max 而不是相加。贴底的元素都别再单独写 `--kb`。
+
+两个已经踩过的坑：`android/.../styles.xml` 的**注释里不能出现连续两个减号**（写 CSS 变量名
+时要避开）；`body` 留白之后 `.app` 的高度必须是容器的 `100%` 而**不是 `100dvh`**，
+后者比容器高出一个安全区，底部那一条会被裁掉。
+
+## 抽屉手势
+
+左缘右滑打开、抽屉上左滑收回，全程跟手；判定规则抽在 `src/ui/edge-swipe.ts`（纯函数、有单测），
+事件在 `src/ui/useEdgeSwipe.ts`。
+
+用**触摸事件在 document 上被动监听**，不用 Pointer Events。这里踩过坑：Pointer Events 配
+`setPointerCapture` 时，浏览器一旦把手势判成滚动就会发 `pointercancel` 抢走它，表现是
+"从左缘拖动完全没反应"（实测 pointerdown 1 次、pointermove 1 次、pointercancel 1 次）。
+被动监听从不 `preventDefault`，也就不会收到 cancel —— 浏览器照常滚动，只在有把握时才动抽屉，
+判成纵向就整个放弃这次手势。
+
 ## 配置
 
 仓库地址、分支与访问令牌都在应用内填写，保存在应用私有存储；令牌只需要目标仓库的 contents 读写权限。

@@ -7,8 +7,39 @@
   --fg-dim: #6b6b70;
   --line: #e5e5ea;
   --accent: #2f6fed;
-  /* 软键盘占位：原生侧只改 WebView 的 bottomMargin，这里兜底老 Android WebView */
+  /*
+   * 软键盘占位。原生侧（MainActivity）只改 WebView 自己的 bottomMargin，那才是
+   * "看得见正在打的字"的关键；这里是网页侧的兜底，给老 Android WebView 用
+   * （那时原生拿不到输入法内边距）。默认 0 而不是留空：老 WebView 没有
+   * visualViewport，算不出这个值，用未定义会让后面的 calc() 整体失效。
+   */
   --kb: 0px;
+  /*
+   * 系统栏安全区（状态栏/挖孔、导航栏/手势条）。三个来源取最大值：
+   *
+   * ① env(safe-area-inset-*)：网页自己的接口，但 Android 上**只有在 WebView 把窗口内边距
+   *    透传给页面时才有值**，老 WebView 一律是 0。
+   * ② --safe-area-inset-*：Capacitor 内置 SystemBars 插件注入的同名变量（本项目已把它的
+   *    自动处理关掉，见 capacitor.config.ts，所以这里恒为 0，留着是为了换回默认时也能用）。
+   * ③ --native-inset-*：MainActivity 兜底注入。Android 14 及以下 + 老 WebView 这一格，
+   *    前两个来源都是 0 而原生也没补内边距，只有这里能拿到真值。
+   *
+   * 三者只在"该由网页自己留白"时才是同一个真值，其余情况是 0，所以取最大值不会叠加。
+   * 每个 var() 都必须写兜底值 —— 少一个，整个 max() 会失效，安全区静默变成 0。
+   */
+  --inset-top: max(env(safe-area-inset-top, 0px), var(--safe-area-inset-top, 0px), var(--native-inset-top, 0px));
+  --inset-right: max(env(safe-area-inset-right, 0px), var(--safe-area-inset-right, 0px), var(--native-inset-right, 0px));
+  --inset-bottom: max(env(safe-area-inset-bottom, 0px), var(--safe-area-inset-bottom, 0px), var(--native-inset-bottom, 0px));
+  --inset-left: max(env(safe-area-inset-left, 0px), var(--safe-area-inset-left, 0px), var(--native-inset-left, 0px));
+  /*
+   * 屏幕底部"被系统或键盘占掉"的那一条。**取最大值而不是相加** —— 键盘和导航栏不会同时
+   * 占着可见区域（键盘弹起时导航栏的内边距已经含在输入法内边距里），相加会多留一条白。
+   *
+   * 底部留白只允许有这一个来源：凡是贴屏幕底部的东西都用它，不要再单独写 var(--bottom-blocked)
+   * 或 var(--inset-bottom)。这里踩过坑 —— 同一个选择器后面又写了一条只用 var(--bottom-blocked) 的
+   * 规则，把前面带安全区的那条覆盖掉了，源码里"看着"是有安全区的，实际没有。
+   */
+  --bottom-blocked: max(var(--kb, 0px), var(--inset-bottom, 0px));
   color-scheme: light dark;
 }
 
@@ -39,6 +70,12 @@ body {
   background: var(--bg);
   color: var(--fg);
   font: 16px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  /*
+   * 系统栏安全区在这里留白：body 的 padding 负责"随文档流动"的内容。
+   * 注意 position: fixed/absolute 的元素按视口定位、不受这里影响，各自还要再让一次
+   * （本项目的 .fab / .toast / .drawer 都在 .main 内，天然落在 .app 的盒子里，所以不用重复补）。
+   */
+  padding: var(--inset-top) var(--inset-right) var(--inset-bottom) var(--inset-left);
   overscroll-behavior: none;
 }
 
@@ -46,10 +83,13 @@ body {
   position: relative;
   display: flex;
   flex-direction: column;
+  /*
+   * 高度只取容器的 100%，**不能用 100dvh**：body 已经把安全区的内边距让出来了，
+   * #root 的高度就是"可用区域"。这里再用视口高度就会比容器高出一个安全区，
+   * 底部那一条被裁掉（真机上表现为页面最下面压进导航栏）。
+   */
   height: 100%;
-  /* 键盘弹起时给底部留位（配合原生 insets 处理） */
-  padding-bottom: var(--kb);
-  scroll-padding-bottom: var(--kb);
+  overflow: hidden;
 }
 
 /* ── 顶栏 ───────────────────────────────────────── */
@@ -126,7 +166,7 @@ body {
   height: 100%;
   overflow-y: auto;
   padding: 16px 16px 96px;
-  scroll-padding-bottom: var(--kb);
+  scroll-padding-bottom: var(--bottom-blocked);
 }
 
 .reader h1,
@@ -204,7 +244,7 @@ body {
   white-space: pre-wrap;
   overflow-wrap: break-word;
   word-break: break-word;
-  scroll-padding-bottom: var(--kb);
+  scroll-padding-bottom: var(--bottom-blocked);
 }
 
 .empty {
@@ -265,8 +305,10 @@ body {
   max-width: 380px;
   background: var(--bg);
   border-right: 1px solid var(--line);
+  /* 没在拖动时由这里决定位置；拖动/吸附期间由 Drawer 组件用 inline style 覆盖 */
   transform: translateX(-102%);
-  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  /* 入场与吸附共用 transform 过渡。时长与 store 里的 DRAWER_SETTLE_MS 对应，改要一起改。 */
+  transition: transform 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
   display: flex;
   flex-direction: column;
   z-index: 21;
@@ -274,6 +316,17 @@ body {
 
 .drawer.open {
   transform: translateX(0);
+}
+
+/*
+ * 拖动期间关掉过渡，否则每一帧都在追一个 0.22s 的动画，手感发黏。
+ *
+ * 这里**只**用过渡、不用 keyframe 动画是刻意的：拖动要把动画关掉，而松手时移除这个标记
+ * 会让 animation-name 从 none 变回具名动画、被浏览器当成一段新动画重新开始，面板先跳回
+ * 屏幕外再滑进来，用户看到的就是"松手时抖动"。只留过渡就没有能被重启的东西。
+ */
+.drawer.dragging {
+  transition: none;
 }
 
 .drawer .head {

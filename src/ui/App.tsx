@@ -5,6 +5,8 @@ import { MemoryFileStore } from '@core/fs/memory-fs';
 import type { FileStore } from '@core/fs/store';
 import { displayTitle, sanitizeNoteName } from '@core/paths';
 import { Drawer } from './Drawer';
+import { useEdgeSwipe } from './useEdgeSwipe';
+import { watchKeyboardHeight } from './viewport';
 import { SyncSheet } from './SyncSheet';
 import { Editor } from './Editor';
 import { EmptyReader, Reader } from './Reader';
@@ -64,6 +66,17 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
     if (!current) return;
     setRenaming(true);
   };
+
+  // 键盘占位：把"被键盘遮住的高度"写进 --bottom-blocked（见 styles.css）。
+  // 原生侧（MainActivity）已经把 WebView 顶上去，这里是 Android 14 及以下 + 老 WebView
+  // 那一格的唯一让位来源；两层不会叠加 —— 原生撑短后可视视口跟着变小，算出来自然接近 0。
+  useEffect(
+    () => watchKeyboardHeight((kb) => document.documentElement.style.setProperty('--kb', `${kb}px`)),
+    [],
+  );
+
+  // 左缘右滑打开抽屉、抽屉上左滑收回（都跟手）。事件挂在 document 上，见 hook 内部注释。
+  useEdgeSwipe();
 
   return (
     <div className="app">

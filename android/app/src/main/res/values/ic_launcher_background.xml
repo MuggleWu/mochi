@@ -4,4 +4,7 @@
          所以两者必须同色 —— 不一致时图案周围会露出一圈异色边。
          米白取自图标源图的底色（#F7F2E8）。 -->
     <color name="ic_launcher_background">#F7F2E8</color>
+    <!-- 启动图底色（Android 12+ 的 windowSplashScreenBackground）。
+         与图标底色同源，避免启动图与图标之间闪一下异色。 -->
+    <color name="splash_background">#F7F2E8</color>
 </resources>

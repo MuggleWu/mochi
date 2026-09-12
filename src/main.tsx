@@ -12,14 +12,6 @@ declare global {
   }
 }
 
-function applyKeyboardOverride(): void {
-  const override = window.__mochiKbOverride;
-  if (!override) return;
-  document.documentElement.style.setProperty('--kb', `${Math.max(0, override.height)}px`);
-}
-
-applyKeyboardOverride();
-
 const root = document.getElementById('root');
 if (!root) throw new Error('缺少 #root 容器');
 

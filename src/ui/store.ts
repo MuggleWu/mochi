@@ -12,6 +12,8 @@ import { FLAG } from '@core/sync/manifest';
 import { GithubClient, type FetchLike } from '@core/net/github';
 import { fetchSnapshot, reconcileSnapshot } from '@core/sync/pull-metadata';
 import { DEFAULT_SETTINGS, type Settings, isConfigured, loadSettings, saveSettings } from '@core/sync/settings';
+import { shouldSnapOpen } from './edge-swipe';
+import { DRAWER_SETTLE_MS } from './drawer-anim';
 
 export type Mode = 'read' | 'edit';
 
@@ -26,6 +28,22 @@ export interface NotesState {
   mode: Mode;
   dirty: boolean;
   drawerOpen: boolean;
+  /**
+   * 抽屉的横向偏移（px）。约定 **0 = 全开，-drawerWidth = 全收起**，直接丢进 translateX。
+   * null = 不在拖动/吸附中，由 CSS 按 drawerOpen 决定位置。
+   */
+  drawerOffset: number | null;
+  /** 抽屉宽度（px）。CSS 与 JS 各有一份公式，挂载后实测校正。 */
+  drawerWidth: number;
+  /**
+   * 单调递增的代数号：任何一次拖动或吸附都让它 +1，用来作废尚未落地的入场回调。
+   *
+   * 为什么需要：点按钮打开抽屉时先在屏幕外渲染一帧、下一帧才滑进来（否则过渡没有起点）。
+   * 这两帧之间用户完全可能先拖了一下 —— 那时旧回调再去改偏移就会把用户的落点覆盖掉。
+   * 真实症状是"轻轻一甩本该关闭，抽屉反而弹开"。用代数号比"判断偏移是否等于某个值"可靠，
+   * 因为关闭吸附的目标值**也是** -width，会撞上。
+   */
+  drawerEnterSeq: number;
   query: string;
   /** 阅读位置（百分比），读写态切换时保持 */
   scrollRatio: number;
@@ -50,6 +68,11 @@ export interface NotesState {
   deleteNote(): Promise<void>;
   setMode(mode: Mode): void;
   setDrawer(open: boolean): void;
+  /** 拖动/吸附期间设偏移；dragging=false 表示走过渡滑到落点。 */
+  setDrawerOffset(offset: number, dragging?: boolean): void;
+  setDrawerWidth(width: number): void;
+  /** 松手落定：按速度与位置决定开合，并滑到落点。 */
+  settleDrawer(release?: { velocity: number; travelled: number }): void;
   setQuery(q: string): void;
   setScrollRatio(r: number): void;
   dismissError(): void;
@@ -75,6 +98,9 @@ export const useNotes = create<NotesState>((set, get) => ({
   mode: 'read',
   dirty: false,
   drawerOpen: false,
+  drawerOffset: null,
+  drawerWidth: 0,
+  drawerEnterSeq: 0,
   query: '',
   scrollRatio: 0,
   error: null,
@@ -239,8 +265,69 @@ export const useNotes = create<NotesState>((set, get) => ({
   setMode(mode) {
     set({ mode });
   },
-  setDrawer(drawerOpen) {
-    set({ drawerOpen });
+  setDrawer(open) {
+    // 点汉堡进来：从屏幕外滑到位。
+    //
+    // 用**过渡**而不是 CSS keyframe 动画，是有教训的：拖动期间要关掉动画，而松手时把
+    // "拖动中"的标记一移除，animation-name 从 none 变回具名动画会被浏览器当成一段**新动画**
+    // 重新开始 —— 面板先跳回屏幕外再滑进来，用户看到的就是"松手时抖动"。
+    // 只留过渡就没有能被重启的东西。
+    if (!open) {
+      set({ drawerOpen: false, drawerOffset: null });
+      return;
+    }
+    if (get().drawerOpen) {
+      // 已经开着（比如拖动中又调了一次）：不要重播入场
+      return;
+    }
+    const width = get().drawerWidth || 320;
+    const seq = get().drawerEnterSeq + 1;
+    set({ drawerOpen: true, drawerOffset: -width, drawerEnterSeq: seq });
+    // 双 rAF：第一帧让浏览器真正把"停在屏幕外"渲染出来，第二帧再改目标值，过渡才有起点。
+    // 合成一次更新的话过渡不会触发，抽屉会"啪"地直接出现。
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const st = get();
+        if (st.drawerEnterSeq !== seq || !st.drawerOpen || st.drawerOffset !== -width) return;
+        set({ drawerOffset: 0 });
+        setTimeout(() => {
+          const after = get();
+          if (after.drawerEnterSeq === seq && after.drawerOpen && after.drawerOffset === 0) {
+            set({ drawerOffset: null });
+          }
+        }, DRAWER_SETTLE_MS);
+      });
+    });
+  },
+
+  setDrawerOffset(offset, dragging = true) {
+    // 拖动/吸附一律作废尚未落地的入场动画（见 setDrawer 里那段注释）
+    void dragging;
+    set({ drawerOffset: offset, drawerEnterSeq: get().drawerEnterSeq + 1 });
+  },
+
+  setDrawerWidth(width) {
+    // 只在真的变了才写：拖动中每帧都设会白白触发重渲染（留 1px 容差）
+    if (width > 0 && Math.abs(width - get().drawerWidth) > 1) set({ drawerWidth: width });
+  },
+
+  settleDrawer(release) {
+    const { drawerOffset, drawerWidth, setDrawerOffset } = get();
+    if (drawerOffset === null) return;
+    // 先看甩动速度（轻轻一甩就按方向定），没有速度才退回"过半"的位置判定
+    const open = shouldSnapOpen(
+      drawerOffset,
+      drawerWidth,
+      release?.velocity ?? 0,
+      release?.travelled ?? 0,
+    );
+    const target = open ? 0 : -drawerWidth;
+    setDrawerOffset(target, false); // 松手后开过渡，滑到落点
+    setTimeout(() => {
+      // 动画期间用户又动了（偏移已不是那个落点）就不要覆盖他的状态
+      if (get().drawerOffset !== target) return;
+      set({ drawerOffset: null, drawerOpen: open });
+    }, DRAWER_SETTLE_MS);
   },
   setQuery(query) {
     set({ query });

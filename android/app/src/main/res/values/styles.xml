@@ -13,10 +13,23 @@
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>
         <item name="android:background">@null</item>
+        <!-- 状态栏与导航栏透明：边到边显示，安全区留白由网页侧负责。
+             真值来自 MainActivity 注入的 CSS 变量，网页侧再与 env() 取最大值。
+             这两条不透明的话会盖住内容，而网页又以为自己拿到了安全区。 -->
+        <!-- 注意：XML 注释里不能出现连续两个减号，写 CSS 变量名时要避开 -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
 
 
+    <!--
+      Android 12+ 由系统用 SplashScreen API 渲染启动画面，windowSplashScreen* 是官方属性，
+      postSplashScreenTheme 指定启动图结束后的正式主题。模板原先只写 android:background，
+      那是旧写法，在 12+ 上会被系统默认的图标 + 底色盖掉。
+    -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
-        <item name="android:background">@drawable/splash</item>
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
     </style>
 </resources>
