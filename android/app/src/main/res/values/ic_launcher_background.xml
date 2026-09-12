@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#FFFFFF</color>
+    <!-- 自适应图标的背景层。前景层只保留图案、四角透明，底色由这里提供，
+         所以两者必须同色 —— 不一致时图案周围会露出一圈异色边。
+         米白取自图标源图的底色（#F7F2E8）。 -->
+    <color name="ic_launcher_background">#F7F2E8</color>
 </resources>
