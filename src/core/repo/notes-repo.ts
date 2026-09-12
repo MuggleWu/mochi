@@ -61,6 +61,44 @@ export class NotesRepo {
     };
   }
 
+  /**
+   * 接受一篇**来自远端**的内容：写盘并直接置成"已同步"状态。
+   *
+   * 为什么不能复用 save()：save() 会把条目标成 DIRTY（那是给本地编辑用的），
+   * 下载来的内容标 DIRTY 会被推送阶段误判成"手机改过"，进而产生假冲突。
+   *
+   * 落盘前**校验内容 sha 与远端一致**：递归树给的 sha 就是 git blob sha，
+   * 内容对不上说明下载被截断或串了，此时宁可当失败也不能写进去（写进去就成了"本地改动"）。
+   */
+  async acceptRemote(path: string, content: string, remoteSha: string): Promise<NoteEntry | null> {
+    const sha = await blobShaOfText(content);
+    if (sha !== remoteSha) return null;
+    await this.store.writeText(noteFile(path), content);
+    return {
+      path,
+      localSha: sha,
+      remoteSha,
+      syncedSha: sha,
+      size: new TextEncoder().encode(content).byteLength,
+      mtime: nowStamp(this.seq++),
+      flags: 0,
+    };
+  }
+
+  /** 本地是否已有这篇的内容（只查 manifest，零 IO）。 */
+  hasContent(path: string, meta: Meta): boolean {
+    const e = meta.notes[path];
+    return !!e && !!e.localSha && e.localSha === e.remoteSha;
+  }
+
+  /**
+   * 直接写入内容（不带 sha 校验）。仅用于读取路径上的兜底缓存，不参与同步判定；
+   * 同步相关的写盘一律走 acceptRemote()。
+   */
+  async setContent(path: string, content: string): Promise<void> {
+    await this.store.writeText(noteFile(path), content);
+  }
+
   /** 保存一篇：写文件 + 算 sha，返回更新后的条目。 */
   async save(path: string, content: string): Promise<NoteEntry> {
     await this.store.writeText(noteFile(path), content);

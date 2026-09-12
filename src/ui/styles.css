@@ -171,7 +171,10 @@ body {
 
 .reader h1,
 .reader h2,
-.reader h3 {
+.reader h3,
+.reader h4,
+.reader h5,
+.reader h6 {
   line-height: 1.3;
 }
 
@@ -195,10 +198,75 @@ body {
   padding: 0;
 }
 
-.reader .math-block {
-  overflow-x: auto;
-  text-align: center;
+/* 表格：笔记里不少，窄屏宁可横向滚也不要把列压到看不清 */
+.reader table {
+  border-collapse: collapse;
   margin: 12px 0;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  font-size: 15px;
+}
+
+.reader th,
+.reader td {
+  border: 1px solid var(--line);
+  padding: 5px 10px;
+  text-align: left;
+}
+
+.reader th {
+  background: var(--bg-soft);
+  font-weight: 600;
+}
+
+.reader blockquote {
+  margin: 12px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--line);
+  color: var(--fg-dim);
+}
+
+.reader hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 20px 0;
+}
+
+/* 行内公式：KaTeX 自带的上下留白在行内会把行距撑开，收紧一点 */
+.reader .katex {
+  font-size: 1.05em;
+}
+
+/*
+ * 块级公式：KaTeX 的 .katex-display 自己会留很多上下边距，且**长公式在窄屏必然溢出**。
+ * 让它横向滚动而不是撑破版面（`overflow-x: auto` 需要块级容器才生效，所以加在外层）。
+ */
+.reader .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
+  margin: 12px 0;
+}
+
+/*
+ * 内链：[[目标]]。M2 只渲染不跳转，所以**刻意做成"看得见但不是链接"**的样子 ——
+ * 用下划线示意它是链接，但颜色弱于真正的外链，避免用户点不动还以为是坏的。
+ */
+.reader .wikilink {
+  color: var(--accent);
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* 渲染器就绪前的纯文本回退：保住换行语义，否则整篇会挤成一行 */
+.reader .md-plain {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reader .md > :first-child {
+  margin-top: 0;
 }
 
 .editor {
@@ -401,6 +469,62 @@ body {
   border: 1px solid var(--line);
   color: var(--fg-dim);
   font-size: 13px;
+}
+
+/*
+ * 内容下载进度条：贴在顶栏下面一条。
+ *
+ * 为什么不做成浮层：它是一段可能持续几分钟的后台工作，浮层要么挡住内容要么得一直躲；
+ * 贴边一条只占 30px 左右，且下载完自己消失。
+ */
+.content-bar {
+  position: relative;
+  padding: 6px 12px;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--fg-dim);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.content-bar-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content-bar-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.content-bar-btn {
+  flex: none;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+/* 进度轨贴在进度条最下沿：细到几乎不占高度，但一眼能看出在动 */
+.content-bar-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.content-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s linear;
 }
 
 .error-bar {

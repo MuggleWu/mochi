@@ -5,7 +5,9 @@ import { MemoryFileStore } from '@core/fs/memory-fs';
 import type { FileStore } from '@core/fs/store';
 import { displayTitle, sanitizeNoteName } from '@core/paths';
 import { Drawer } from './Drawer';
+import { ContentBar } from './ContentBar';
 import { useEdgeSwipe } from './useEdgeSwipe';
+import { prefetchMarkdown } from './md';
 import { watchKeyboardHeight } from './viewport';
 import { SyncSheet } from './SyncSheet';
 import { Editor } from './Editor';
@@ -48,6 +50,9 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
 
   useEffect(() => {
     void init(injected ?? pickStore());
+    // 启动后就把渲染管线拉下来：几百 KB 的包，等用户点开笔记时通常已经就位，
+    // 避免第一篇先闪一下纯文本。失败也不影响使用（阅读态会一直走纯文本回退）。
+    prefetchMarkdown();
   }, [init, injected]);
 
   useEffect(() => {
@@ -104,6 +109,8 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
           <button onClick={dismissError}>知道了</button>
         </div>
       )}
+
+      <ContentBar />
 
       <main className="main">
         {ready && !current && <EmptyReader />}

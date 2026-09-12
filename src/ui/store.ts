@@ -7,7 +7,15 @@ import { create } from 'zustand';
 import type { FileStore } from '@core/fs/store';
 import { MANIFEST_FILE } from '@core/fs/layout';
 import { NotesRepo } from '@core/repo/notes-repo';
-import { emptyMeta, deserializeMeta, serializeMeta, type Meta, type NoteEntry } from '@core/sync/manifest';
+import {
+  emptyMeta,
+  deserializeMeta,
+  serializeMeta,
+  pendingContentCount,
+  type Meta,
+  type NoteEntry,
+} from '@core/sync/manifest';
+import { L1_COUNT, planDownloads, runDownloads } from '@core/sync/pull-content';
 import { FLAG } from '@core/sync/manifest';
 import { GithubClient, type FetchLike } from '@core/net/github';
 import { fetchSnapshot, reconcileSnapshot } from '@core/sync/pull-metadata';
@@ -56,10 +64,29 @@ export interface NotesState {
   /** 上次同步的摘要，用于顶栏提示。 */
   lastSyncNote: string;
 
+  /** 内容拉取中的阶段文案（空串 = 没在拉）。 */
+  pullStage: string;
+  /** 本次内容拉取已完成篇数。 */
+  pullDone: number;
+  /** 本次内容拉取计划总篇数。 */
+  pullTotal: number;
+  /** 还差多少篇内容没下载（全部，不只是本次计划）。 */
+  pendingContent: number;
+  /** 内容拉取是否暂停。 */
+  pullPaused: boolean;
+  /** 正在单独拉取某一篇（L3 按需）。 */
+  openingNote: boolean;
+
   init(store: FileStore): Promise<void>;
   saveConfig(next: Settings): Promise<void>;
   /** 拉取远端元数据（阶段一）：一个请求拿到全部笔记，不下载内容。 */
   pullMetadata(): Promise<void>;
+  /** 拉取内容：先 L1（最近 300 篇），再 L2（后台补齐）。自动开跑，可暂停。 */
+  pullContent(options?: { limit?: number }): Promise<void>;
+  /** 暂停内容拉取（当前批次跑完即停，已下好的保留）。 */
+  pauseContent(): void;
+  /** 单篇内容到位后并入清单（下载与按需拉取共用）。 */
+  setNoteEntry(entry: NoteEntry): void;
   createNote(): Promise<void>;
   openNote(path: string): Promise<void>;
   setContent(content: string): void;
@@ -84,6 +111,18 @@ let store: FileStore | null = null;
 let repo: NotesRepo | null = null;
 /** 网络实现可注入，便于端到端自测（默认走真实 fetch）。 */
 let fetchImpl: FetchLike | undefined;
+/** 内容拉取是否被要求暂停。放模块级：循环里每次都要读，且暂停必须在当前批次后立刻生效。 */
+let pullStopRequested = false;
+/**
+ * 正在跑的那次内容拉取。放模块级而不是 state：Promise 不该进渲染状态，
+ * 但"等它跑完"是外部（端到端自测、同步收尾）真实需要的，所以留一个可等待的句柄。
+ */
+let pullRun: Promise<void> | null = null;
+/**
+ * 世代号：每次开始新的内容拉取就 +1。旧的那次在下一批任务前会看到自己的世代号过期而退出 ——
+ * 端到端自测里换了假网络时，上一次的运行必须立刻让位，否则会拿新网络去下旧任务。
+ */
+let pullGeneration = 0;
 
 const byMtimeDesc = (meta: Meta) => (a: string, b: string): number =>
   (meta.notes[b]?.mtime ?? 0) - (meta.notes[a]?.mtime ?? 0);
@@ -108,6 +147,12 @@ export const useNotes = create<NotesState>((set, get) => ({
   settings: { ...DEFAULT_SETTINGS },
   syncStage: '',
   lastSyncNote: '',
+  pullStage: '',
+  pullDone: 0,
+  pullTotal: 0,
+  pendingContent: 0,
+  pullPaused: false,
+  openingNote: false,
 
   async init(fs: FileStore) {
     store = fs;
@@ -181,19 +226,42 @@ export const useNotes = create<NotesState>((set, get) => ({
       set({ syncStage: '并入本地清单' });
       const next = reconcileSnapshot(meta, snap);
       const order = Object.keys(next.notes).sort(byMtimeDesc(next));
+      const pending = pendingContentCount(next);
       set({
         meta: next,
         order,
         syncStage: '',
-        lastSyncNote: `已读取 ${snap.files.length} 篇笔记的清单（内容按需下载）`,
+        lastSyncNote: `已读取 ${snap.files.length} 篇笔记的清单，待下载内容 ${pending} 篇`,
         toast: `远端共 ${snap.files.length} 篇笔记`,
+        pendingContent: pending,
       });
       await persistManifest(next);
+      // 清单就位后**不 await**：列表此刻已经可用，内容下载是后台的事。
+      // 让它接着跑，用户马上就能打开最近的笔记（D4 的"能立刻用"）。
+      if (pending > 0) void get().pullContent();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const hint = (err as { hint?: string }).hint;
       set({ syncStage: '', error: hint ? `${message}\n${hint}` : message });
     }
+  },
+
+  async pullContent(options) {
+    const run = doPullContent(options);
+    pullRun = run;
+    await run;
+  },
+
+  pauseContent() {
+    // 只置标记：runDownloads 会在当前批次跑完后自然退出，已下好的保留
+    pullStopRequested = true;
+    set({ pullPaused: true });
+  },
+
+  setNoteEntry(entry) {
+    const meta = get().meta;
+    const next: Meta = { ...meta, notes: { ...meta.notes, [entry.path]: entry } };
+    set({ meta: next, pendingContent: pendingContentCount(next) });
   },
 
   async createNote() {
@@ -208,11 +276,64 @@ export const useNotes = create<NotesState>((set, get) => ({
   async openNote(path: string) {
     if (!repo) return;
     const opened = await repo.open(path);
-    if (!opened) {
-      set({ error: `打不开《${path}》（本地还没有这篇内容）` });
+    if (opened) {
+      set({
+        current: path,
+        content: opened.content,
+        mode: 'read',
+        dirty: false,
+        drawerOpen: false,
+        drawerOffset: null,
+        scrollRatio: 0,
+      });
       return;
     }
-    set({ current: path, content: opened.content, mode: 'read', dirty: false, drawerOpen: false, scrollRatio: 0 });
+
+    // 本地没有内容 → L3 按需拉取：打开哪篇拉哪篇。
+    // 这是"首启只有最近 300 篇可读"的兜底 —— 用户点了一篇很久没动的笔记时，
+    // 不该只得到一句"尚未下载"，有网就顺手拉下来。
+    const { settings, meta } = get();
+    const entry = meta.notes[path];
+    if (!isConfigured(settings) || !entry?.remoteSha) {
+      set({ error: `《${path}》尚未下载，且没有可用的同步配置。` });
+      return;
+    }
+
+    set({ openingNote: true, error: null });
+    try {
+      const client = new GithubClient({
+        token: settings.token,
+        repo: settings.repo,
+        branch: settings.branch,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+      const text = await client.readBlobText(entry.remoteSha);
+      const saved = await repo.acceptRemote(path, text, entry.remoteSha);
+      if (!saved) {
+        set({ openingNote: false, error: `《${path}》下载内容校验不符，暂时打不开。` });
+        return;
+      }
+      get().setNoteEntry(saved);
+      await persistManifest(get().meta);
+      set({
+        current: path,
+        content: text,
+        mode: 'read',
+        dirty: false,
+        drawerOpen: false,
+        drawerOffset: null,
+        scrollRatio: 0,
+        openingNote: false,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const hint = (err as { hint?: string }).hint;
+      set({
+        openingNote: false,
+        // 无网时如实说"尚未下载"，不假装成别的问题
+        error: hint ? `${message}\n${hint}` : `${message}（《${path}》尚未下载，联网后可打开）`,
+      });
+    }
   },
 
   setContent(content: string) {
@@ -347,6 +468,107 @@ export const useNotes = create<NotesState>((set, get) => ({
   },
 }));
 
+/**
+ * 内容拉取的实际实现（从 store 的 action 里抽出来）。
+ *
+ * 抽出来的理由：要能"等它跑完"与"作废它"。action 里的 `void get().pullContent()`
+ * 是后台跑的，外部拿不到句柄；而端到端自测换了假网络时，上一次的运行必须立刻让位。
+ */
+async function doPullContent(options?: { limit?: number }): Promise<void> {
+  const generation = ++pullGeneration;
+  const stale = (): boolean => generation !== pullGeneration;
+  const get = (): NotesState => useNotes.getState();
+  const set = (patch: Partial<NotesState>): void => useNotes.setState(patch);
+  const state = get();
+  if (!isConfigured(state.settings) || !repo) return;
+  if (state.pullStage) return; // 已经在拉，不要叠第二份
+
+  const limit = options?.limit;
+  // 新一代开始就把上一代的暂停标记清掉：否则用户"暂停后再继续"会被旧标记立刻停住
+  pullStopRequested = false;
+  set({ pullPaused: false });
+
+  const client = new GithubClient({
+    token: state.settings.token,
+    repo: state.settings.repo,
+    branch: state.settings.branch,
+    ...(fetchImpl ? { fetchImpl } : {}),
+  });
+
+  // 本次运行里失败的篇目：不要在同一次运行里反复重试（下一轮同步自然会再试一遍）
+  const failed = new Set<string>();
+  let totalOk = 0;
+  let totalFailed = 0;
+
+  try {
+    // 循环两轮：第一轮 L1（最近 300 篇，先让"打开就能读"），第二轮 L2（后台补齐其余）。
+    // 每轮都重新算 plan —— localSha 在 acceptRemote 后已经更新，所以已下好的会自然被排除，
+    // 不需要额外的"下到哪了"游标（那种状态一旦和清单不一致就会漏下或重下）。
+    for (const tier of ['L1', 'L2'] as const) {
+      // 每一批任务前检查：用户暂停了，或者这次运行已经被新一代取代
+      if (pullStopRequested || stale()) break;
+      const meta = get().meta;
+      const plan = planDownloads({
+        order: get().order,
+        notes: meta.notes,
+        skip: failed,
+        ...(tier === 'L1' ? { limit: limit ?? L1_COUNT } : {}),
+      });
+      if (plan.paths.length === 0) continue;
+
+      set({
+        pullStage: tier === 'L1' ? '下载最近笔记' : '后台补齐内容',
+        pullDone: 0,
+        pullTotal: plan.paths.length,
+      });
+
+      const result = await runDownloads({
+        paths: plan.paths,
+        fetchText: (sha) => client.readBlobText(sha),
+        remoteShaOf: (path) => get().meta.notes[path]?.remoteSha,
+        accept: async (path, content, remoteSha) => {
+          const entry = await repo!.acceptRemote(path, content, remoteSha);
+          if (!entry) return false;
+          get().setNoteEntry(entry);
+          return true;
+        },
+        onProgress: (p) => {
+          set({ pullDone: p.done });
+        },
+        shouldStop: () => pullStopRequested || stale(),
+      });
+
+      for (const path of result.failed) failed.add(path);
+      totalOk += result.ok.length;
+      totalFailed += result.failed.length;
+      // 每轮结束落一次盘即可：逐篇写会伤闪存，且真中断了也只是重下
+      await persistManifest(get().meta);
+      if (result.stopped) break;
+    }
+
+    if (stale()) return; // 已被新一代取代，别把它的状态覆盖掉
+    const pending = pendingContentCount(get().meta);
+    const stopped = pullStopRequested;
+    set({
+      pullStage: '',
+      pendingContent: pending,
+      pullPaused: stopped && pending > 0,
+      lastSyncNote: stopped
+        ? `已暂停：本次下好 ${totalOk} 篇，还差 ${pending} 篇`
+        : `内容已就绪：本次下好 ${totalOk} 篇${totalFailed ? `，${totalFailed} 篇失败` : ''}，还差 ${pending} 篇`,
+      ...(totalOk > 0 && !stopped ? { toast: `已下载 ${totalOk} 篇笔记内容` } : {}),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const hint = (err as { hint?: string }).hint;
+    set({
+      pullStage: '',
+      pendingContent: pendingContentCount(get().meta),
+      error: hint ? `${message}\n${hint}` : message,
+    });
+  }
+}
+
 /** 清单落盘（只写这一个文件；内容搜索索引是 M4 的事）。 */
 async function persistManifest(meta: Meta): Promise<void> {
   if (!store) return;
@@ -356,6 +578,28 @@ async function persistManifest(meta: Meta): Promise<void> {
 /** 供端到端自测注入假网络（不传则走真实 fetch）。 */
 export function __setFetchForTest(fake?: FetchLike): void {
   fetchImpl = fake;
+}
+
+/**
+ * 等正在跑的内容拉取结束（端到端自测用）。
+ *
+ * 为什么必须有：`pullMetadata()` 里那一句 `void get().pullContent()` 是后台跑的，
+ * 调用方 await 不到它。测试如果不先等它结束，就会带着悬空异步进入下一个用例 ——
+ * 表现为"上一个用例的请求数跑到了下一个用例里"。
+ */
+export async function __awaitContentPullForTest(): Promise<void> {
+  while (pullRun) {
+    const run = pullRun;
+    await run.catch(() => {});
+    if (pullRun === run) pullRun = null;
+  }
+}
+
+/** 作废正在跑的内容拉取（换假网络前调用，别让它拿新网络去下旧任务）。 */
+export function __abortContentPullForTest(): void {
+  pullGeneration++;
+  pullStopRequested = true;
+  pullRun = null;
 }
 
 /** 供端到端自测注入替身文件层（浏览器里没有 Capacitor 桥时也走它）。 */

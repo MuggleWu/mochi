@@ -37,6 +37,22 @@ export interface NoteEntry {
   flags: number;
 }
 
+/**
+ * 还有多少篇的内容没下载（localSha 与 remoteSha 不一致的都算）。
+ *
+ * 判定只看 localSha === remoteSha 这一条：状态只有清单这一份，
+ * 不会出现"标记说下过了但文件其实没了"的漂移。
+ */
+export function pendingContentCount(meta: Meta): number {
+  let n = 0;
+  for (const path of Object.keys(meta.notes)) {
+    const e = meta.notes[path];
+    if (!e || !e.remoteSha) continue;
+    if (e.localSha !== e.remoteSha) n++;
+  }
+  return n;
+}
+
 export interface Meta {
   schemaVersion: number;
   /** 目标仓库，形如 `owner/repo`（由用户在设置里填，不写进代码）。 */

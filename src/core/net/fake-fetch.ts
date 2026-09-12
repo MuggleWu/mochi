@@ -25,6 +25,13 @@ export interface FakeRoute {
     /** 延迟毫秒（模拟超时）。 */
     delayMs?: number;
   }>;
+  /**
+   * 按请求 URL 临时决定响应（优先于 responses 序列）。
+   *
+   * 存在的理由：blob 这类路由是**一个路由对应无数篇内容**，靠 responses 的顺序数组
+   * 根本对不上号（并发下载时顺序还不确定）。给一个函数钩子，就能按 URL 里的 sha 精确返回。
+   */
+  respond?: (url: string, init?: RequestInit) => Response | undefined;
 }
 
 export class FakeFetch {
@@ -52,6 +59,9 @@ export class FakeFetch {
       return typeof r.match === 'string' ? input.includes(r.match) : r.match.test(input);
     });
     if (!route) return new Response(JSON.stringify({ message: `未预设的路由: ${method} ${input}` }), { status: 599 });
+
+    const dynamic = route.respond?.(input, init);
+    if (dynamic) return dynamic;
 
     const used = this.counters.get(route) ?? 0;
     this.counters.set(route, used + 1);

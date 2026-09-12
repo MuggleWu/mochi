@@ -32,6 +32,11 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
     await saveConfig({ repo: repo.trim(), branch: branch.trim() || 'master', token: token.trim() });
     await pullMetadata();
     setBusy(false);
+    // 成功就自动关：清单已经到手，**内容下载还在后台跑**（顶栏下面会出现进度条），
+    // 面板继续开着只会用它的遮罩挡住顶栏，用户还得先点一下才能打开目录。
+    //
+    // 出错时**不要关**：错误提示就在这个面板里，关了等于把用户要看的下一步操作一起关掉。
+    if (!useNotes.getState().error) onClose();
   };
 
   const field: React.CSSProperties = {
