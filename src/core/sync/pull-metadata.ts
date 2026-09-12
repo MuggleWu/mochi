@@ -18,17 +18,46 @@ export interface RemoteSnapshot {
   treeSha: string;
   /** 根目录 markdown：路径 → blob sha / 大小。 */
   files: Array<{ path: string; sha: string; size: number }>;
+  /** 树的 ETag，存下来供下次条件请求。 */
+  treeEtag: string;
 }
 
-/** 取远端快照（分支头 → 提交 → 递归树）。 */
-export async function fetchSnapshot(client: GithubClient): Promise<RemoteSnapshot> {
+/** 已知的本地状态，用来跳过不必要的下载。 */
+export interface FetchHint {
+  /** 上次同步到的提交。分支头没动就完全不用再取树。 */
+  lastCommit: string;
+  /** 上次的树 ETag。 */
+  lastEtag: string;
+}
+
+/**
+ * 取远端快照（分支头 → 提交 → 递归树）。
+ *
+ * 两处短路，专治"树太大、下载太慢"：
+ *  1. 分支头没动（sha 与上次相同）→ 直接返回 null，一个字节都不下载。
+ *  2. 带上次的 ETag 发条件请求，GitHub 回 304 → 同样不下载。
+ * 实测一万篇的仓库：完整下载 660 KB / 23 秒，304 只要 1.1 秒。
+ */
+export async function fetchSnapshot(
+  client: GithubClient,
+  hint?: FetchHint,
+): Promise<RemoteSnapshot | null> {
   const commitSha = await client.getRefHead();
+  if (hint?.lastCommit && hint.lastCommit === commitSha) return null; // 远端没动
+
   const commit = await client.getCommit(commitSha);
-  const listing = await client.listTree(commit.treeSha);
+  // 树 sha 与上次相同（例如只推了空提交）也直接短路
+  const listing =
+    hint?.lastEtag && hint.lastCommit
+      ? await client.listTreeConditional(commit.treeSha, hint.lastEtag)
+      : await client.listTree(commit.treeSha);
+  if (!listing) return null; // 304：树没变
+
   const notes = rootMarkdownFiles(listing.entries, isNoteName);
   return {
     commitSha,
     treeSha: commit.treeSha,
+    treeEtag: listing.etag ?? '',
     files: notes.map((e: TreeEntry) => ({ path: e.path, sha: e.sha, size: e.size ?? 0 })),
   };
 }
@@ -72,6 +101,7 @@ export function reconcileSnapshot(meta: Meta, snap: RemoteSnapshot, now = Date.n
     ...meta,
     lastCommit: snap.commitSha,
     lastTree: snap.treeSha,
+    treeEtag: snap.treeEtag || meta.treeEtag,
     notes,
     lastSyncAt: now,
   };

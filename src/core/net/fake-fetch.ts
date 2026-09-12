@@ -86,6 +86,11 @@ export class FakeFetch {
 
     const status = spec.status ?? 200;
     const payload = spec.json !== undefined ? JSON.stringify(spec.json) : (spec.text ?? '');
+    // 304/204/205 属于"禁止响应体"的状态码：`new Response('', {status:304})` 会抛
+    // TypeError（被上层误判成网络失败）。GitHub 的 304 本来就不带体，这里如实构造。
+    if (status === 304 || status === 204 || status === 205) {
+      return new Response(null, { status, headers: spec.headers ?? {} });
+    }
     return new Response(payload, { status, headers: spec.headers ?? {} });
   };
 

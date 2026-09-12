@@ -108,6 +108,8 @@ export interface TreeListing {
   /** GitHub 在超过 10 万条目或 7MB 时会截断；我们只把它当错误处理，不做分页猜测。 */
   truncated: boolean;
   treeSha: string;
+  /** 响应带的 ETag，存下来供下次条件请求（树没变时省掉整个下载）。 */
+  etag?: string | null;
 }
 
 export interface CommitInfo {
@@ -165,6 +167,17 @@ export class GithubClient {
 
   /** 底层请求：带超时、失败分类、幂等请求的有限重试。 */
   private async request<T>(path: string, init: RequestInit & { raw?: boolean } = {}, retriable = true): Promise<T> {
+    return (await this.requestWithMeta<T>(path, init, retriable)).data;
+  }
+
+  /**
+   * 与 request 相同，但把响应头一并带回来 —— 条件请求（ETag）需要它。
+   */
+  private async requestWithMeta<T>(
+    path: string,
+    init: RequestInit & { raw?: boolean } = {},
+    retriable = true,
+  ): Promise<{ data: T; status: number; etag: string | null }> {
     const url = `${this.apiBase}${path}`;
     let lastError: GithubError | null = null;
 
@@ -196,9 +209,15 @@ export class GithubClient {
       }
       clearTimeout(timer);
 
+      // 304：内容没变。这不是错误 —— 调用方据此跳过整个下载。
+      if (res.status === 304) {
+        return { data: undefined as T, status: 304, etag: res.headers.get('etag') };
+      }
+
       if (res.ok) {
-        if (init.raw) return (await res.arrayBuffer()) as unknown as T;
-        return (await res.json()) as T;
+        const etag = res.headers.get('etag');
+        if (init.raw) return { data: (await res.arrayBuffer()) as unknown as T, status: res.status, etag };
+        return { data: (await res.json()) as T, status: res.status, etag };
       }
 
       const body = await res.text().catch(() => '');
@@ -244,10 +263,34 @@ export class GithubClient {
 
   /** 递归列目录（一次请求拿到全部条目）。 */
   async listTree(treeSha: string): Promise<TreeListing> {
-    const data = await this.request<{ tree?: TreeEntry[]; truncated?: boolean; sha?: string }>(
+    const listing = await this.listTreeConditional(treeSha, null);
+    if (!listing) throw new GithubError('bad-response', 304, '树没有变化', '内部错误：不该在无条件请求下收到 304。');
+    return listing;
+  }
+
+  /**
+   * 带 ETag 的递归列目录。
+   *
+   * 为什么要这个：递归树是同步里最贵的一个请求 —— 实测某个一万篇的仓库
+   * 树响应 660 KB，而本机到 GitHub 只有 28 KB/s，**下载要 23 秒**。
+   * 带上 If-None-Match 后，树没变时 GitHub 直接回 304、**0 字节、1.1 秒**，
+   * 快 20 倍。所以"内容没变就不下载"必须靠它。
+   *
+   * 返回 null 表示 304（内容没变），调用方应当沿用上次结果。
+   */
+  async listTreeConditional(treeSha: string, etag: string | null): Promise<TreeListing | null> {
+    const headers: Record<string, string> = etag ? { 'If-None-Match': etag } : {};
+    const res = await this.requestWithMeta<{ tree?: TreeEntry[]; truncated?: boolean; sha?: string }>(
       `/repos/${this.repo}/git/trees/${treeSha}?recursive=1`,
+      { headers },
     );
-    return { entries: data.tree ?? [], truncated: Boolean(data.truncated), treeSha: data.sha ?? treeSha };
+    if (res.status === 304) return null;
+    return {
+      entries: res.data.tree ?? [],
+      truncated: Boolean(res.data.truncated),
+      treeSha: res.data.sha ?? treeSha,
+      etag: res.etag,
+    };
   }
 
   /** 读 blob 原始内容（text）。 */

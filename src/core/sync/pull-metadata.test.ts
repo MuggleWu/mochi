@@ -50,17 +50,18 @@ describe('fetchSnapshot', () => {
     );
 
     const snap = await fetchSnapshot(github);
+    expect(snap).not.toBeNull();
     expect(fake.requests).toHaveLength(3);
-    expect(snap.commitSha).toBe('c1');
-    expect(snap.treeSha).toBe('t1');
-    expect(snap.files.map((f) => f.path)).toEqual(['读书笔记.md', '会议记录.md']);
-    expect(snap.files[0]!.sha).toBe('sha-读书笔记.md');
+    expect(snap!.commitSha).toBe('c1');
+    expect(snap!.treeSha).toBe('t1');
+    expect(snap!.files.map((f) => f.path)).toEqual(['读书笔记.md', '会议记录.md']);
+    expect(snap!.files[0]!.sha).toBe('sha-读书笔记.md');
   });
 
   it('空仓库得到空列表（不报错）', async () => {
     const { github } = client(treeRoutes([]));
     const snap = await fetchSnapshot(github);
-    expect(snap.files).toEqual([]);
+    expect(snap!.files).toEqual([]);
   });
 });
 
@@ -68,6 +69,7 @@ describe('reconcileSnapshot', () => {
   const snap = (files: Array<{ path: string; sha: string; size: number }>, commit = 'c1', tree = 't1') => ({
     commitSha: commit,
     treeSha: tree,
+    treeEtag: 'W/"etag-1"',
     files,
   });
 

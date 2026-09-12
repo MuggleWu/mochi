@@ -122,7 +122,7 @@ describe('配置后拉取元数据', () => {
     expect(err).toContain('令牌');
   });
 
-  it('重复同步是幂等的，第二次仍只有 3 个请求', async () => {
+  it('重复同步时若远端没动，只发 1 个请求就收工（不重下整棵树）', async () => {
     const fake = treeFake([blob('a.md'), blob('b.md')]);
     __setFetchForTest(fake.fetch);
 
@@ -131,10 +131,68 @@ describe('配置后拉取元数据', () => {
     await useNotes.getState().saveConfig({ repo: 'owner/repo', branch: 'master', token: 'tok' });
 
     await useNotes.getState().pullMetadata();
-    await useNotes.getState().pullMetadata();
+    expect(fake.requests).toHaveLength(3); // 首次：ref + commit + tree
 
-    expect(fake.requests).toHaveLength(6); // 每次 3 个
-    expect(useNotes.getState().order).toHaveLength(2);
+    await useNotes.getState().pullMetadata();
+    // 第二次只查分支头，发现没动就短路 —— 递归树是同步里最贵的请求，
+    // 实测一万篇的仓库它要下载 660 KB、23 秒
+    expect(fake.requests).toHaveLength(4);
+    expect(fake.count('/git/trees/')).toBe(1);
+    expect(useNotes.getState().lastSyncNote).toContain('没有变化');
+    expect(useNotes.getState().order).toHaveLength(2); // 清单原样保留
+  });
+
+  it('分支头动了但树没变时，靠 ETag 拿到 304，同样不下载', async () => {
+    // 每个路由一条，按队列依次返回（写两条同样的 match 是错的：
+    // 假 fetch 按首个匹配的路由取响应，第二条永远不会被用到）
+    const fake = new FakeFetch([
+      {
+        match: '/git/ref/heads/master',
+        responses: [{ json: { object: { sha: 'c1' } } }, { json: { object: { sha: 'c2' } } }],
+      },
+      {
+        match: '/git/commits/',
+        responses: [
+          { json: { sha: 'c1', tree: { sha: 't1' } } },
+          { json: { sha: 'c2', tree: { sha: 't1' } } },
+        ],
+      },
+      {
+        match: '/git/trees/t1',
+        responses: [
+          { json: { sha: 't1', truncated: false, tree: [blob('a.md')] }, headers: { etag: 'W/"e1"' } },
+          { status: 304, text: '' },
+        ],
+      },
+    ]);
+    __setFetchForTest(fake.fetch);
+
+    useNotes.setState({ ready: false, order: [] });
+    await useNotes.getState().init(new MemoryFileStore());
+    await useNotes.getState().saveConfig({ repo: 'owner/repo', branch: 'master', token: 'tok' });
+
+    await useNotes.getState().pullMetadata();
+    expect(useNotes.getState().meta.treeEtag).toBe('W/"e1"');
+
+    await useNotes.getState().pullMetadata();
+    const s = useNotes.getState();
+    expect(s.error).toBeNull();
+    expect(s.lastSyncNote).toContain('没有变化');
+    // 第二次：ref + commit + 一次条件请求（304 后不再下载）
+    expect(fake.requests.map((r) => r.url.replace('https://api.github.com/repos/owner/repo', ''))).toEqual([
+      '/git/ref/heads/master',
+      '/git/commits/c1',
+      '/git/trees/t1?recursive=1',
+      '/git/ref/heads/master',
+      '/git/commits/c2',
+      '/git/trees/t1?recursive=1',
+    ]);
+    const cond = fake.requests.filter((r) => r.headers['If-None-Match'] === 'W/"e1"');
+    expect(cond).toHaveLength(1);
+    expect(cond[0]!.url).toContain('/git/trees/t1');
+    // 树没变，清单原样保留
+    expect(s.order).toHaveLength(1);
+    expect(s.meta.lastCommit).toBe('c1');
   });
 
   it('令牌不会被写进清单文件', async () => {

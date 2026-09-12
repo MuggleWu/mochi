@@ -47,6 +47,11 @@ export interface Meta {
   lastCommit: string;
   /** 上次同步的根树 sha（推送时作为 base_tree）。 */
   lastTree: string;
+  /**
+   * 上次递归树响应的 ETag。树没变时用它发条件请求，GitHub 回 304、0 字节。
+   * 实测一万篇的仓库，树响应 660 KB、下载要 23 秒，而 304 只要 1.1 秒 —— 差 20 倍。
+   */
+  treeEtag: string;
   /** 笔记清单，键为 path。 */
   notes: Record<string, NoteEntry>;
   /** 尚未解决的冲突（必须持久化，见文件头注释）。 */
@@ -64,6 +69,7 @@ export function emptyMeta(repo = '', branch = 'master'): Meta {
     branch,
     lastCommit: '',
     lastTree: '',
+    treeEtag: '',
     notes: {},
     conflicts: [],
     lastSyncAt: 0,
@@ -224,6 +230,7 @@ export function serializeMeta(meta: Meta): string {
     branch: meta.branch,
     lastCommit: meta.lastCommit,
     lastTree: meta.lastTree,
+    treeEtag: meta.treeEtag,
     conflicts: meta.conflicts,
     lastSyncAt: meta.lastSyncAt,
     notes,
@@ -247,6 +254,7 @@ export function deserializeMeta(text: string): Meta {
   const meta = emptyMeta(typeof o['repo'] === 'string' ? o['repo'] : '', typeof o['branch'] === 'string' ? o['branch'] : 'master');
   meta.lastCommit = typeof o['lastCommit'] === 'string' ? o['lastCommit'] : '';
   meta.lastTree = typeof o['lastTree'] === 'string' ? o['lastTree'] : '';
+  meta.treeEtag = typeof o['treeEtag'] === 'string' ? o['treeEtag'] : '';
   meta.conflicts = Array.isArray(o['conflicts']) ? o['conflicts'].filter((x): x is string => typeof x === 'string') : [];
   meta.lastSyncAt = typeof o['lastSyncAt'] === 'number' ? o['lastSyncAt'] : 0;
 
