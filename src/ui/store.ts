@@ -5,10 +5,13 @@
  */
 import { create } from 'zustand';
 import type { FileStore } from '@core/fs/store';
-import { MANIFEST_FILE, META_FILE } from '@core/fs/layout';
+import { MANIFEST_FILE } from '@core/fs/layout';
 import { NotesRepo } from '@core/repo/notes-repo';
 import { emptyMeta, deserializeMeta, serializeMeta, type Meta, type NoteEntry } from '@core/sync/manifest';
 import { FLAG } from '@core/sync/manifest';
+import { GithubClient, type FetchLike } from '@core/net/github';
+import { fetchSnapshot, reconcileSnapshot } from '@core/sync/pull-metadata';
+import { DEFAULT_SETTINGS, type Settings, isConfigured, loadSettings, saveSettings } from '@core/sync/settings';
 
 export type Mode = 'read' | 'edit';
 
@@ -28,8 +31,17 @@ export interface NotesState {
   scrollRatio: number;
   error: string | null;
   toast: string | null;
+  /** 同步配置（仓库/分支/令牌）。令牌只在内存与私有文件里。 */
+  settings: Settings;
+  /** 同步进行中的阶段文案（空串 = 空闲）。 */
+  syncStage: string;
+  /** 上次同步的摘要，用于顶栏提示。 */
+  lastSyncNote: string;
 
   init(store: FileStore): Promise<void>;
+  saveConfig(next: Settings): Promise<void>;
+  /** 拉取远端元数据（阶段一）：一个请求拿到全部笔记，不下载内容。 */
+  pullMetadata(): Promise<void>;
   createNote(): Promise<void>;
   openNote(path: string): Promise<void>;
   setContent(content: string): void;
@@ -47,6 +59,8 @@ export interface NotesState {
 
 let store: FileStore | null = null;
 let repo: NotesRepo | null = null;
+/** 网络实现可注入，便于端到端自测（默认走真实 fetch）。 */
+let fetchImpl: FetchLike | undefined;
 
 const byMtimeDesc = (meta: Meta) => (a: string, b: string): number =>
   (meta.notes[b]?.mtime ?? 0) - (meta.notes[a]?.mtime ?? 0);
@@ -65,6 +79,9 @@ export const useNotes = create<NotesState>((set, get) => ({
   scrollRatio: 0,
   error: null,
   toast: null,
+  settings: { ...DEFAULT_SETTINGS },
+  syncStage: '',
+  lastSyncNote: '',
 
   async init(fs: FileStore) {
     store = fs;
@@ -90,8 +107,57 @@ export const useNotes = create<NotesState>((set, get) => ({
       await fs.writeText(MANIFEST_FILE, serializeMeta(meta));
     }
 
-    set({ meta, order: Object.keys(meta.notes).sort(byMtimeDesc(meta)), ready: true, loadStage: '' });
-    await persistSettings();
+    const settings = await loadSettings(fs);
+    set({
+      meta,
+      order: Object.keys(meta.notes).sort(byMtimeDesc(meta)),
+      ready: true,
+      loadStage: '',
+      settings,
+      lastSyncNote: meta.lastSyncAt ? `上次同步 ${new Date(meta.lastSyncAt).toLocaleString()}` : '尚未同步过',
+    });
+  },
+
+  async saveConfig(next) {
+    if (!store) return;
+    await saveSettings(store, next);
+    const repoChanged = next.repo !== get().settings.repo || next.branch !== get().settings.branch;
+    set({ settings: next, toast: '同步设置已保存' });
+    if (repoChanged) set({ lastSyncNote: '仓库已更改，下次同步会重新建立清单' });
+  },
+
+  async pullMetadata() {
+    const { settings, meta } = get();
+    if (!isConfigured(settings)) {
+      set({ error: '还没有配置同步仓库：请在设置里填写「仓库」与「访问令牌」' });
+      return;
+    }
+    set({ syncStage: '连接 GitHub' });
+    try {
+      const client = new GithubClient({
+        token: settings.token,
+        repo: settings.repo,
+        branch: settings.branch,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+      set({ syncStage: '读取仓库结构' });
+      const snap = await fetchSnapshot(client);
+      set({ syncStage: '并入本地清单' });
+      const next = reconcileSnapshot(meta, snap);
+      const order = Object.keys(next.notes).sort(byMtimeDesc(next));
+      set({
+        meta: next,
+        order,
+        syncStage: '',
+        lastSyncNote: `已读取 ${snap.files.length} 篇笔记的清单（内容按需下载）`,
+        toast: `远端共 ${snap.files.length} 篇笔记`,
+      });
+      await persistManifest(next);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const hint = (err as { hint?: string }).hint;
+      set({ syncStage: '', error: hint ? `${message}\n${hint}` : message });
+    }
   },
 
   async createNote() {
@@ -190,11 +256,9 @@ async function persistManifest(meta: Meta): Promise<void> {
   await store.writeText(MANIFEST_FILE, serializeMeta(meta));
 }
 
-/** 设置单独存（与清单分开，避免同步时反复写大文件）。 */
-async function persistSettings(): Promise<void> {
-  if (!store) return;
-  const { meta } = useNotes.getState();
-  await store.writeText(META_FILE, JSON.stringify({ repo: meta.repo, branch: meta.branch }));
+/** 供端到端自测注入假网络（不传则走真实 fetch）。 */
+export function __setFetchForTest(fake?: FetchLike): void {
+  fetchImpl = fake;
 }
 
 /** 供端到端自测注入替身文件层（浏览器里没有 Capacitor 桥时也走它）。 */

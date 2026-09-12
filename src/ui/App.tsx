@@ -5,6 +5,7 @@ import { MemoryFileStore } from '@core/fs/memory-fs';
 import type { FileStore } from '@core/fs/store';
 import { displayTitle, sanitizeNoteName } from '@core/paths';
 import { Drawer } from './Drawer';
+import { SyncSheet } from './SyncSheet';
 import { Editor } from './Editor';
 import { EmptyReader, Reader } from './Reader';
 import { useNotes } from './store';
@@ -37,8 +38,10 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
   const deleteNote = useNotes((s) => s.deleteNote);
   const setScrollRatio = useNotes((s) => s.setScrollRatio);
   const dismissError = useNotes((s) => s.dismissError);
+  const syncStage = useNotes((s) => s.syncStage);
 
   const [renaming, setRenaming] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
   const [toastVisible, setToastVisible] = useState(false);
 
   useEffect(() => {
@@ -77,8 +80,8 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
           {current ? displayTitle(current) : 'mochi'}
           {dirty ? ' •' : ''}
         </div>
-        <button className="pill" disabled title="同步功能将在 M1/M2 接入">
-          推送增量
+        <button className="pill" onClick={() => setSyncOpen(true)} title="同步设置与拉取">
+          {syncStage || '同步'}
         </button>
       </header>
 
@@ -105,6 +108,8 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
         <Drawer />
         {toastVisible && toast && <div className="toast">{toast}</div>}
       </main>
+
+      {syncOpen && <SyncSheet onClose={() => setSyncOpen(false)} />}
 
       {renaming && current && (
         <RenameDialog
