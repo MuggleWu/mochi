@@ -1,6 +1,7 @@
 /**
  * 设置：仓库、分支、访问令牌在**运行时**由用户填写，存在应用私有目录。
  *
+ * 令牌只落在这个私有文件里，不写日志、不进错误信息。
  */
 import type { FileStore } from '@core/fs/store';
 import { META_FILE } from '@core/fs/layout';

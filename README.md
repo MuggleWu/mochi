@@ -77,3 +77,6 @@ cp android/app/build/outputs/apk/debug/app-debug.apk ../mochi-产物/mochi-lates
 
 归档前**核对 APK 里确实是当前代码**：分包后的 JS 直接在 `assets/public/assets/*.js`，可以用 `unzip -p <apk> <该文件> | grep <刚改的标识符>` 确认。踩过一次坑——图标改完就出包归档，结果那份 APK 里没有同批的同步优化代码。
 
+## 配置
+
+仓库地址、分支与访问令牌都在应用内填写，保存在应用私有存储；令牌只需要目标仓库的 contents 读写权限。
