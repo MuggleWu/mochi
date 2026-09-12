@@ -17,5 +17,6 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
     reporters: ['default'],
+    setupFiles: ['./src/test-setup.ts'],
   },
 });

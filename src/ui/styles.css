@@ -1,0 +1,384 @@
+:root {
+  --row-h: 56px;
+  --bar-h: 52px;
+  --bg: #ffffff;
+  --bg-soft: #f6f6f7;
+  --fg: #1c1c1e;
+  --fg-dim: #6b6b70;
+  --line: #e5e5ea;
+  --accent: #2f6fed;
+  /* 软键盘占位：原生侧只改 WebView 的 bottomMargin，这里兜底老 Android WebView */
+  --kb: 0px;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131315;
+    --bg-soft: #1c1c1f;
+    --fg: #ececf0;
+    --fg-dim: #9a9aa2;
+    --line: #2c2c31;
+    --accent: #5b8dff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  overscroll-behavior: none;
+}
+
+.app {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  /* 键盘弹起时给底部留位（配合原生 insets 处理） */
+  padding-bottom: var(--kb);
+  scroll-padding-bottom: var(--kb);
+}
+
+/* ── 顶栏 ───────────────────────────────────────── */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--bar-h);
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  flex: none;
+}
+
+.bar .title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar .title.empty {
+  color: var(--fg-dim);
+  font-weight: 400;
+}
+
+.icon-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  font-size: 18px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.icon-btn:disabled {
+  color: var(--fg-dim);
+  opacity: 0.5;
+}
+
+.icon-btn:active {
+  background: var(--bg-soft);
+}
+
+.pill {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--fg);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* ── 内容区 ─────────────────────────────────────── */
+.main {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.reader {
+  height: 100%;
+  overflow-y: auto;
+  padding: 16px 16px 96px;
+  scroll-padding-bottom: var(--kb);
+}
+
+.reader h1,
+.reader h2,
+.reader h3 {
+  line-height: 1.3;
+}
+
+.reader pre {
+  background: var(--bg-soft);
+  padding: 12px;
+  border-radius: 10px;
+  overflow-x: auto;
+  font-size: 14px;
+}
+
+.reader code {
+  background: var(--bg-soft);
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 0.92em;
+}
+
+.reader pre code {
+  background: none;
+  padding: 0;
+}
+
+.reader .math-block {
+  overflow-x: auto;
+  text-align: center;
+  margin: 12px 0;
+}
+
+.editor {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+  font: 15px/22px ui-monospace, "PingFang SC", monospace;
+}
+
+.editor .gutter {
+  flex: none;
+  width: 46px;
+  overflow: hidden;
+  position: relative;
+  background: var(--bg-soft);
+  color: var(--fg-dim);
+  text-align: right;
+  font-size: 12px;
+}
+
+.editor .gutter-inner {
+  position: absolute;
+  inset: 0 0 auto 0;
+  will-change: transform;
+}
+
+.editor .gutter-inner span {
+  display: block;
+  height: 22px;
+  padding-right: 8px;
+}
+
+.editor textarea {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  padding: 0 12px 96px 10px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  scroll-padding-bottom: var(--kb);
+}
+
+.empty {
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 14px;
+}
+
+/* ── 浮动按钮 ───────────────────────────────────── */
+.fab {
+  position: absolute;
+  right: 16px;
+  bottom: 24px;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  font-size: 22px;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 22%);
+  cursor: pointer;
+}
+
+.fab:active {
+  transform: scale(0.96);
+}
+
+/* ── 抽屉 ───────────────────────────────────────── */
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 38%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease;
+  z-index: 20;
+}
+
+.scrim.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.drawer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 84%;
+  max-width: 380px;
+  background: var(--bg);
+  border-right: 1px solid var(--line);
+  transform: translateX(-102%);
+  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  display: flex;
+  flex-direction: column;
+  z-index: 21;
+}
+
+.drawer.open {
+  transform: translateX(0);
+}
+
+.drawer .head {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 8px;
+}
+
+.drawer input[type='search'] {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 11px;
+  background: var(--bg-soft);
+  color: var(--fg);
+  font-size: 14px;
+}
+
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.row {
+  height: var(--row-h);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  gap: 2px;
+}
+
+.row.active {
+  background: var(--bg-soft);
+}
+
+.row .name {
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row .meta {
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.new-note {
+  margin: 10px;
+  padding: 11px;
+  border-radius: 10px;
+  border: 1px dashed var(--line);
+  background: transparent;
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+  text-align: center;
+  flex: none;
+}
+
+.banner {
+  margin: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+
+.error-bar {
+  background: #b3261e;
+  color: #fff;
+  padding: 10px 14px;
+  font-size: 13px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.error-bar button {
+  background: rgb(255 255 255 / 18%);
+  border: 0;
+  color: #fff;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: 90px;
+  transform: translateX(-50%);
+  background: rgb(0 0 0 / 82%);
+  color: #fff;
+  border-radius: 10px;
+  padding: 9px 14px;
+  font-size: 13px;
+  z-index: 30;
+  pointer-events: none;
+}
