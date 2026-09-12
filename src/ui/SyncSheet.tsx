@@ -113,7 +113,10 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
 
         <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 12, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
           <div>{ready ? lastSyncNote : '启动中…'}</div>
-          <div style={{ marginTop: 4 }}>当前阶段只拉取「笔记清单」（不下载内容）；内容按需下载与推送在后续阶段接入。</div>
+          <div style={{ marginTop: 4 }}>
+            保存后会先取「笔记清单」，然后自动下载最近 300 篇的内容，其余在后台补齐（可暂停）。
+            打开某篇而本地没有时会就地拉那一篇。
+          </div>
         </div>
       </div>
     </div>
