@@ -55,9 +55,25 @@ cd android && ./gradlew assembleDebug   # 需先设好 ANDROID_HOME
 - 先按"与底色明显不同"抠出图案的实际外接框，再裁成正方形并留 6% 边距 —— 源图四周留白很大（图案只占画布 72%），直接缩放会让图标显得很小
 - **自适应图标前景**里的图案占画布 94%：几何上限是 1/√2 ≈ 70.7%（图案须落在画布内切圆内），本图案近似圆形、方形外接框四角本来就是空的，实测取到 94% 仍零裁切；留 6% 余量给抗锯齿
 - 前景层的 alpha **只用来定形状，不能当颜色深浅**：低饱和的柔和图案若按颜色差线性给 alpha，整张会变半透明、合成后颜色偏淡（本图单通道差最大只有 158，线性映射后 alpha 上限仅 153）。所以只把"很接近底色"的像素判为透明，其余一律不透明，12~40 的窄区间做过渡以保留抗锯齿
-- 背景层用纯白（`#FFFFFF`），与源图底色一致
+- 背景层用米白 `#F7F2E8`，与源图底色一致 —— **自适应图标的前景层只保留图案、四角是透明的，底色由背景层提供，所以 `ic_launcher_background` 与源图底色必须同色**，不一致时图案周围会露出一圈异色边
 - 旧版（API 26 以下）图标用"白圆底 + 居中图案"，避免方形图标在圆形启动器上被切角
 - 启动图沿用模板尺寸，白底居中放图案，图案占较短边的 30%
 
 产物为 `mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher{,_round,_foreground}.png` 与 11 张 `drawable*/splash.png`，共 26 个文件。
+
+## 构建产物
+
+出包后把 APK 归档到与仓库同级的 **`../mochi-产物/`**（本仓库的上一级目录，每次构建都要放）：
+
+- `mochi-latest.apk` —— 最新一版，装机用这个
+- `mochi-<版本>-debug-<日期>.apk` —— 按日期留档，便于回退到旧版本
+
+```sh
+npm run build && npx cap sync android && (cd android && ./gradlew assembleDebug)
+cp android/app/build/outputs/apk/debug/app-debug.apk ../mochi-产物/mochi-latest.apk
+```
+
+出包前需要指向本机 Android SDK（`ANDROID_HOME`），路径按各自环境设；Gradle 仓库已换成国内镜像，直连 dl.google.com 会 TLS 握手失败。
+
+归档前**核对 APK 里确实是当前代码**：分包后的 JS 直接在 `assets/public/assets/*.js`，可以用 `unzip -p <apk> <该文件> | grep <刚改的标识符>` 确认。踩过一次坑——图标改完就出包归档，结果那份 APK 里没有同批的同步优化代码。
 
