@@ -30,9 +30,24 @@ interface Props {
    * 可能不一样，报源文的数字会让用户看到"共 5 处"却只跳得到 3 处。
    */
   onMarked: (count: number) => void;
+  /**
+   * 点了外链。**只上报、不在这里打开** —— 打开要等用户在确认弹层里点过"打开"。
+   *
+   * 渲染层已经把外链的 `href` 换成了 `#`（见 `render.ts`），所以不接这个回调的话，
+   * 表现是"点了没反应"。由上层弹确认弹层，路径只有一条，不会漏。
+   */
+  onExternalLink: (url: string) => void;
 }
 
-export function Reader({ content, initialRatio, onRatioChange, query, findIndex, onMarked }: Props): React.JSX.Element {
+export function Reader({
+  content,
+  initialRatio,
+  onRatioChange,
+  query,
+  findIndex,
+  onMarked,
+  onExternalLink,
+}: Props): React.JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
   const renderer = useMarkdownRenderer();
   const html = renderer ? renderer.render(content) : '';
@@ -89,6 +104,17 @@ export function Reader({ content, initialRatio, onRatioChange, query, findIndex,
   /** 点内链：解析出目标就跳，解析不出就明说，不要默默什么都不做。 */
   const handleClick = (e: React.MouseEvent<HTMLDivElement>): void => {
     const target = e.target as HTMLElement | null;
+
+    // 外链：交给上层弹确认。渲染层已经把 href 换成了 `#`，所以这里不是"防跳转"，
+    // 而是外链唯一的触发点 —— 不接的话点了就没反应。
+    const link = target?.closest?.('[data-external]');
+    if (link) {
+      e.preventDefault();
+      const url = link.getAttribute('data-external') ?? '';
+      if (url) onExternalLink(url);
+      return;
+    }
+
     const span = target?.closest?.('[data-wikilink]');
     if (!span) return;
     const raw = span.getAttribute('data-wikilink') ?? '';

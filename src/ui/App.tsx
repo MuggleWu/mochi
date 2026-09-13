@@ -12,6 +12,7 @@ import { NoteNav } from './NoteNav';
 import { useEdgeSwipe } from './useEdgeSwipe';
 import { prefetchMarkdown } from './md';
 import { watchKeyboardHeight } from './viewport';
+import { ExternalLinkConfirm } from './ExternalLinkConfirm';
 import { SyncSheet } from './SyncSheet';
 import { FindBar } from './FindBar';
 import { findMatches, matchLabel, replaceAllLiteral, replaceOne, stepIndex } from './find';
@@ -63,6 +64,8 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
    * 直接对源文做匹配，源文里有多少处就是多少处。
    */
   const [markedCount, setMarkedCount] = useState(0);
+  /** 待确认的外链；空串表示没有。 */
+  const [pendingLink, setPendingLink] = useState('');
 
   const matches = useMemo(() => findMatches(content, query, { caseSensitive }), [content, query, caseSensitive]);
   // 阅读态以 DOM 里的实际标记数为准，避免"共 5 处却只跳得到 3 处"
@@ -363,6 +366,7 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
             query={ui.find ? query : ''}
             findIndex={findIndex}
             onMarked={setMarkedCount}
+            onExternalLink={setPendingLink}
           />
         )}
         {current && mode === 'edit' && (
@@ -380,6 +384,7 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
       </main>
 
       {ui.sync && <SyncSheet onClose={() => setUi('sync', false)} />}
+      <ExternalLinkConfirm url={pendingLink} onClose={() => setPendingLink('')} />
 
       {ui.rename && current && (
         <RenameDialog

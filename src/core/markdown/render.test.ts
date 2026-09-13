@@ -127,13 +127,47 @@ describe('基础渲染与安全', () => {
     expect(html).toContain('&lt;b&gt;');
   });
 
-  it('外链新开且断开 opener', () => {
-    const html = r.render('[某站](https://example.com)');
-    expect(html).toContain('target="_blank"');
-    expect(html).toContain('rel="noopener noreferrer"');
+  it('链接都带上 rel=noopener noreferrer', () => {
+    // 从前这条断言的是 `target="_blank"`。**行为已经改了**：外链不再直接跳转，
+    // 而是等确认弹层里点过"打开"再走，所以 `target` 不再设置（见下面那一组测试）。
+    // `rel` 仍然要留：确认之后那次导航是普通的同窗口跳转，断开 opener 依然有意义。
+    expect(r.render('[某站](https://example.com)')).toContain('rel="noopener noreferrer"');
   });
 
   it('空内容不抛错', () => {
     expect(r.render('')).toBe('');
+  });
+});
+
+describe('外链不直接跳转，等确认', () => {
+  it('http 链接换成 data-external，href 拿掉', () => {
+    const html = r.render('[看这个](https://example.com/a?b=1)');
+    expect(html).toContain('data-external="https://example.com/a?b=1"');
+    // href 必须是 `#`：留着真地址的话，任何一处漏掉拦截就变成静默跳走
+    expect(html).toContain('href="#"');
+    expect(html).not.toContain('href="https://example.com');
+    // 也不该再有 target=_blank —— 打开由确认之后的那次导航负责
+    expect(html).not.toContain('target="_blank"');
+  });
+
+  it('http:// 与 mailto: 也算外链', () => {
+    expect(r.render('[a](http://example.com)')).toContain('data-external="http://example.com"');
+    expect(r.render('[b](mailto:x@example.com)')).toContain('data-external="mailto:x@example.com"');
+  });
+
+  it('内链（wikilink）不受影响', () => {
+    const html = r.render('见 [[某某笔记]]');
+    expect(html).toContain('data-wikilink="某某笔记"');
+    expect(html).not.toContain('data-external');
+  });
+
+  it('纯锚点不算外链（它本来就该在页内跳）', () => {
+    const html = r.render('[跳到某处](#某处)');
+    expect(html).not.toContain('data-external');
+  });
+
+  it('相对链接不算外链（笔记库内部路径）', () => {
+    const html = r.render('[别的笔记](别的笔记.md)');
+    expect(html).not.toContain('data-external');
   });
 });

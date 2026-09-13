@@ -65,14 +65,28 @@ export function createMarkdownRenderer(): MarkdownRenderer {
     breaks: true,
   });
 
-  // 外链一律新开并断开 opener。移动端由 WebView 打开（外链确认与系统浏览器跳转是 M2 之后的事）
+  /*
+   * 外链**不自动跳转**，等用户在确认弹层里点过"打开"再走。
+   *
+   * 从前这里给 `<a>` 加 `target="_blank"`，点是能打开（Capacitor 的 WebView 客户端把
+   * http(s) 导航交给系统处理），但**误触一下就离开应用**。笔记里的链接是长期沉淀下来的，
+   * 手机上从浏览器切回来还要重新找位置，代价不小。
+   *
+   * 做法是给链接打上 `data-external`，让阅读态在点击时拦下来、先弹确认；
+   * 不写 `href` 是为了**从根上不给"直接跳走"的机会** —— 只靠 `preventDefault()`
+   * 的话，任何一处漏掉拦截都会变成静默跳转。
+   */
   const defaultLinkOpen =
     md.renderer.rules.link_open ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
   md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
     // noUncheckedIndexedAccess 下 tokens[idx] 是可空的，先收窄再改属性
     const token = tokens[idx];
     if (token) {
-      token.attrSet('target', '_blank');
+      const href = token.attrGet('href') ?? '';
+      if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('#')) {
+        token.attrSet('data-external', href);
+        token.attrSet('href', '#');
+      }
       token.attrSet('rel', 'noopener noreferrer');
     }
     return defaultLinkOpen(tokens, idx, options, env, self);
