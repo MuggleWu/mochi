@@ -86,11 +86,18 @@ export function useEdgeSwipe(): void {
       if (e.touches.length !== 1) return; // 多指（缩放等）不接管
       const touch = e.touches[0];
       if (!touch) return;
-      const { drawerOpen, current, mode } = useNotes.getState();
+      const { drawerOpen, current } = useNotes.getState();
       const target = e.target instanceof Element ? e.target : null;
 
-      // 编辑态不接管：那里要在文本上拖动选择、光标移动，抢手势会很难用
-      if (mode === 'edit') return;
+      // 编辑态**也接管**，但只认最左缘那条窄带（`inEdgeZone`，很窄）。
+      //
+      // 曾经这里是一句"编辑态直接不接管"，理由是怕抢了在正文上拖动选择、移动光标。
+      // 真机用下来这个取舍是错的：编辑时恰恰最常需要滑出抽屉去换一篇 —— 而那一下就
+      // 落在正文左缘，于是"编辑态抽屉打不开"。而长按选文字基本都从正文中间开始，
+      // 与这条窄带几乎不重叠。
+      //
+      // 注意判定顺序：下面"抽屉已开着"的分支不受影响（那时靠 `.drawer` 命中来判断），
+      // 所以编辑态下收回抽屉照旧可用。
       // 弹层开着时不接管，免得两层手势打架
       if (document.querySelector('.sheet')) return;
       void current;

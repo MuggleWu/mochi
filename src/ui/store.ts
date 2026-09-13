@@ -231,8 +231,45 @@ let indexSavedVersion = 0;
 let indexRun: Promise<void> | null = null;
 /** 搜索的世代号：输入变化很快时，旧的异步结果不该覆盖新的。 */
 let searchGeneration = 0;
+
+/**
+ * 搜索词的落盘防抖句柄。
+ *
+ * 每敲一个字就写一次会话文件太浪费（一次 IO 换一个字符，输入法联想下尤其密），
+ * 所以攒一小会儿再写。但这带来一个必须处理的坑：**会话文件里还有草稿等状态**，
+ * 若防抖回调晚于 `saveSession()` 落地，就会拿旧的 query 把新写的会话覆盖回去 ——
+ * 因此 `saveSession()` 里要先把它取消掉。
+ */
+let querySaveTimer: ReturnType<typeof setTimeout> | null = null;
+const QUERY_SAVE_DELAY_MS = 400;
 /** 搜索结果条数上限。够用了：再多用户也不会滚到底，而且每多一条就多一次读盘拿摘要。 */
 const SEARCH_LIMIT = 100;
+
+/** 取消尚未落地的搜索词写入。 */
+function cancelQuerySave(): void {
+  if (querySaveTimer !== null) {
+    clearTimeout(querySaveTimer);
+    querySaveTimer = null;
+  }
+}
+
+/**
+ * 把搜索词攒一小会儿再落盘。
+ *
+ * 搜索词属于"下次打开还想看到"的状态，但它**只在会话文件里持久化** —— 而会话只在
+ * 切后台、切模式那类时机才写。于是"敲完词直接杀掉应用"这一路，关键词就丢了
+ * （真机反馈：重开应用，之前搜的词和结果都没了）。
+ *
+ * 这里不立刻写、而是延后一小会儿，是因为每敲一个字写一次太浪费；而
+ * `saveSession()` 会先 `cancelQuerySave()`，所以两条写入路径不会互相覆盖。
+ */
+function scheduleQuerySave(): void {
+  cancelQuerySave();
+  querySaveTimer = setTimeout(() => {
+    querySaveTimer = null;
+    void useNotes.getState().saveSession();
+  }, QUERY_SAVE_DELAY_MS);
+}
 
 /**
  * 把索引落盘（有改动才写）。
@@ -1032,6 +1069,8 @@ export const useNotes = create<NotesState>((set, get) => ({
 
   async saveSession() {
     if (!store) return;
+    // 挂起的防抖写入必须作废：它带的是敲字当时的 query，会覆盖掉这次要写的会话
+    cancelQuerySave();
     const { current, content, mode, dirty, scrollRatio, query } = get();
     const state: SessionState = {
       current,
@@ -1073,6 +1112,8 @@ export const useNotes = create<NotesState>((set, get) => ({
 
   async setSearchQuery(query) {
     set({ query });
+    // 关键词要能跨重启留住，所以这里就安排落盘；结果（rows）由关键词推出来，不必单独存
+    scheduleQuerySave();
     const q = query.trim();
     if (!q) {
       set({ rows: [] });

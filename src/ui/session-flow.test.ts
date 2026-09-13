@@ -45,6 +45,10 @@ const relaunch = async (fs: MemoryFileStore): Promise<void> => {
   await useNotes.getState().init(fs);
 };
 
+/** 等搜索词的防抖写入落地（比防抖时长稍长一点）。 */
+const waitQuerySaved = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 600));
+
 beforeEach(() => resetState());
 
 describe('重新打开应用后回到离开时的样子', () => {
@@ -73,6 +77,38 @@ describe('重新打开应用后回到离开时的样子', () => {
     expect(s.scrollRatio).toBe(0.62);
     expect(s.query).toBe('长');
     expect(s.current).toBe('长文.md');
+  });
+
+  it('**光敲搜索词、不切后台**，重开也还在（真机反馈：之前搜的词和结果都没了）', async () => {
+    // 这条与上一条的区别是要害所在：上一条手动调了 `saveSession()`，等于替应用把活干了，
+    // 所以它测的只是"会话文件能装下搜索词"，测不出"搜索词会不会自己被存下来"。
+    // 真实路径是：用户敲完词就把应用杀了 —— 没有任何时机去调 saveSession()。
+    // 所以这里刻意**不调** saveSession()，只等自动落盘，然后重启。
+    const fs = await firstRun({ 'notes/甲.md': '橘子' });
+    useNotes.getState().setSearchQuery('橘子');
+    // 等自动落盘那一刻过去。这里用真定时器：全局开假定时器会把别的用例里
+    // 依赖真定时器的路径一起拖死（试过，连带 4 条用例超时）。
+    await waitQuerySaved();
+    await relaunch(fs);
+    expect(useNotes.getState().query).toBe('橘子');
+  });
+
+  it('关键词落盘不会把会话里的其他状态覆盖成旧的', async () => {
+    // 防抖写入与 saveSession() 是两条写入路径，若防抖那次晚于 saveSession() 落地，
+    // 它带的是敲字当时的 query，会把刚写的会话整个盖回去。saveSession() 里取消挂起写入就是为了这个。
+    const fs = await firstRun({ 'notes/甲.md': '橘子' });
+    await useNotes.getState().openNote('甲.md');
+    useNotes.getState().setSearchQuery('橘');
+    // 敲完立刻写一次完整会话（模拟"这时切后台了"）
+    await useNotes.getState().saveSession();
+    useNotes.getState().setSearchQuery('橘子');
+    await useNotes.getState().saveSession();
+    // 再等一会儿：被取消的那次不该把 '橘' 盖回来
+    await waitQuerySaved();
+    await relaunch(fs);
+    const s = useNotes.getState();
+    expect(s.query).toBe('橘子');
+    expect(s.current).toBe('甲.md');
   });
 
   it('写着字切出去、回来接着写：未保存的内容不丢', async () => {
