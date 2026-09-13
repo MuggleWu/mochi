@@ -42,6 +42,13 @@ or a specific piece is useful to you.
 如果你是来找一个**在维护的**、面向 Git 仓库 Markdown 笔记的 Android 客户端，那它不是。
 设计文档和代码都还在，如果其中的思路或某个具体做法对你有用，尽管拿走。
 
+## License / 许可
+
+**MIT** — see [LICENSE](LICENSE). © 2026 MuggleWu
+
+用就是了：不必在文件里逐个注明出处，也没有任何担保。项目已停更，更不会有人来管你
+怎么用。
+
 ---
 
 ## 它做什么
