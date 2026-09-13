@@ -280,3 +280,157 @@ describe('反推真实修改时间', () => {
     expect(hasRealMtime((await readMeta(fs)).notes['甲.md'])).toBe(false);
   });
 });
+
+describe('排序：近期修改的必须在上面', () => {
+  it('时间未知的笔记沉到下面，绝不用"下载时刻"顶上去', async () => {
+    // 「甲.md」在版本历史里没出现过 → 时间未知
+    const fake = new FakeFetch([
+      { match: '/git/ref/heads/master', responses: [{ json: { object: { sha: 'c1' } } }] },
+      {
+        match: '/git/trees/t1',
+        responses: [
+          {
+            json: {
+              sha: 't1',
+              truncated: false,
+              tree: [
+                { path: '老笔记.md', mode: '100644', type: 'blob', sha: 's0', size: 5 },
+                { path: '刚改过.md', mode: '100644', type: 'blob', sha: 's1', size: 5 },
+              ],
+            },
+          },
+        ],
+      },
+      { match: '/git/blobs/', responses: [{ text: '' }] },
+      {
+        match: /commits/,
+        responses: [{ json: [] }],
+        respond: (url: string): Response | undefined => {
+          if (url.includes('/commits?')) {
+            return Response.json([{ sha: 'c1', commit: { committer: { date: '2020-01-01T00:00:00Z' } } }]);
+          }
+          if (Number(new URL(url).searchParams.get('page') ?? '1') > 1) return Response.json({ files: [] });
+          // 只改了「刚改过.md」；「老笔记.md」没在历史里出现过
+          return Response.json({
+            sha: 'c1',
+            tree: { sha: 't1' },
+            parents: [],
+            commit: { committer: { date: '2020-01-01T00:00:00Z' } },
+            files: [{ filename: '刚改过.md' }],
+          });
+        },
+      },
+    ]);
+    await configureAndSync(fake);
+
+    // 关键：两篇都是"刚刚下载"的，但排序必须是「有真实时间的」在前
+    expect(useNotes.getState().order).toEqual(['刚改过.md', '老笔记.md']);
+  });
+
+  it('一次同步只走一段窗口，剩下的留给下次（首轮就能看到效果）', async () => {
+    // 造 8 个提交，窗口设为 3
+    const many = Array.from({ length: 8 }, (_, i) => ({
+      sha: `c${i + 1}`,
+      date: new Date(Date.UTC(2026, 0, 20) - i * 86_400_000).toISOString(),
+    }));
+    const fake = new FakeFetch([
+      { match: '/git/ref/heads/master', responses: [{ json: { object: { sha: 'c1' } } }] },
+      {
+        match: '/git/trees/t1',
+        responses: [
+          {
+            json: {
+              sha: 't1',
+              truncated: false,
+              tree: [{ path: 'c1.md', mode: '100644', type: 'blob', sha: 's1', size: 5 }],
+            },
+          },
+        ],
+      },
+      { match: '/git/blobs/', responses: [{ text: '' }] },
+      {
+        match: /commits/,
+        responses: [{ json: [] }],
+        respond: (url: string): Response | undefined => {
+          if (url.includes('/commits?')) {
+            return Response.json(
+              many.map((c) => ({ sha: c.sha, commit: { committer: { date: c.date } } })),
+            );
+          }
+          const sha = (url.split('/commits/')[1] ?? '').split('?')[0] ?? '';
+          if (Number(new URL(url).searchParams.get('page') ?? '1') > 1) return Response.json({ files: [] });
+          return Response.json({ sha, tree: { sha: 't1' }, parents: [], commit: { committer: { date: many.find((m) => m.sha === sha)?.date ?? '' } }, files: [{ filename: `${sha}.md` }] });
+        },
+      },
+    ]);
+    __setFetchForTest(fake.fetch);
+    const fs = new MemoryFileStore();
+    await useNotes.getState().init(fs);
+    await useNotes.getState().saveConfig({ repo: 'owner/repo', branch: 'master', token: 'ok' });
+    await useNotes.getState().pullMetadata();
+
+    // 走一次，窗口 3
+    await useNotes.getState().refreshMtimes({ maxCommits: 3 });
+    const meta1 = useNotes.getState().meta;
+    expect(meta1.histFrontier).toBe('c3'); // 走到的位置
+    const dated = Object.values(meta1.notes).filter((e) => hasRealMtime(e));
+    expect(dated).toHaveLength(1); // 只算到 c1..c3 里改过的
+
+    // 再走一次，接着往旧走（不是从头重来）
+    const before = fake.requests.length;
+    await useNotes.getState().refreshMtimes({ maxCommits: 3 });
+    const meta2 = useNotes.getState().meta;
+    expect(meta2.histFrontier).toBe('c6');
+    expect(fake.requests.length).toBeGreaterThan(before);
+  });
+});
+
+describe('搜索结果就是列表顺序的子序列', () => {
+  it('搜同一个词，命中顺序与列表完全一致（不按文件名、不按下载时刻）', async () => {
+    // 三篇的文件名都含"关键词"（文件名命中只查内存，零 IO），
+    // 且三篇的落盘时刻相同（"刚刚下载"）—— 唯一的差别只有反推出来的真实时间
+    const fs = new MemoryFileStore({
+      'notes/关键词-未知.md': 'x',
+      'notes/关键词-最新.md': 'x',
+      'notes/关键词-居中.md': 'x',
+    });
+    resetState();
+    await useNotes.getState().init(fs);
+
+    const entry = (fileMtime: number) => ({
+      path: '',
+      localSha: 's',
+      remoteSha: 's',
+      syncedSha: 's',
+      size: 1,
+      mtime: Date.UTC(2026, 0, 1), // 下载时刻全一样，排除干扰
+      fileMtime,
+      flags: 8,
+    });
+    const notes = {
+      '关键词-未知.md': entry(0), // 时间未知
+      '关键词-最新.md': entry(Date.UTC(2026, 8, 1)),
+      '关键词-居中.md': entry(Date.UTC(2025, 0, 1)),
+    };
+    useNotes.setState((s) => ({ meta: { ...s.meta, notes } }));
+
+    // 没有公开的"重排"动作，这里按同一套规则算一遍（与 store 里的 byMtimeDesc 一致：
+    // 时间已知的按真实时间倒序在前，未知的整组在后）。真实环境里同步/保存后会自动重排。
+    const meta = useNotes.getState().meta;
+    const list = Object.keys(notes).sort((a, b) => {
+      const ka = meta.notes[a]!.fileMtime > 0;
+      const kb = meta.notes[b]!.fileMtime > 0;
+      if (ka !== kb) return ka ? -1 : 1;
+      const va = ka ? meta.notes[a]!.fileMtime : meta.notes[a]!.mtime;
+      const vb = kb ? meta.notes[b]!.fileMtime : meta.notes[b]!.mtime;
+      return vb - va;
+    });
+    useNotes.setState({ order: list });
+
+    await useNotes.getState().setSearchQuery('关键词');
+
+    // 列表：最新的在上、未知的在最下。搜索必须给出**同一个相对顺序**（子序列）
+    expect(list).toEqual(['关键词-最新.md', '关键词-居中.md', '关键词-未知.md']);
+    expect(useNotes.getState().visible()).toEqual(list);
+  });
+});

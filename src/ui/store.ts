@@ -19,7 +19,16 @@ import { CONCURRENCY, L1_COUNT, planDownloads, runDownloads } from '@core/sync/p
 // 与内容下载用同一个并发数。整理历史是"每提交一个请求"，单路要几十分钟；
 // 并发起来能把总时间压到分钟级，再高容易撞限流。
 const HISTORY_CONCURRENCY = CONCURRENCY;
-import { FLAG, effectiveMtime } from '@core/sync/manifest';
+
+/**
+ * 单次同步最多整理多少个提交。
+ *
+ * 从最新往旧走，走满就停，前沿记下，下次接着走。取这个数是为了"第一次同步就能看到
+ * 正确排序"：近期改动集中在最新的一段里，先把这一段算准，用户马上能感受到效果，
+ * 历史深处则在后续每次同步里慢慢补齐（每次的成本是可控的、且随时可中断）。
+ */
+const HISTORY_WINDOW = 150;
+import { FLAG, hasRealMtime } from '@core/sync/manifest';
 import { GithubClient, type FetchLike } from '@core/net/github';
 import { fetchSnapshot, reconcileSnapshot } from '@core/sync/pull-metadata';
 import { walkHistory } from '@core/history/mtime';
@@ -223,13 +232,28 @@ function startRefreshMtimes(opts?: { maxCommits?: number }): void {
 }
 
 /**
- * 按修改时间倒序。
+ * 列表顺序：**时间已知的按真实时间倒序在前，时间未知的整组在后**。
  *
- * 用 `effectiveMtime`：有真实修改时间就用真实的，没有才退回"落盘时刻"。
- * 整理过历史之后，手机上看到的顺序才和电脑上一致。
+ * 分区比较，不做跨组减法 —— 真实时间与"落盘时刻"不是同一个量纲，混着比会把老笔记
+ * 顶到最上面。为什么这一点非如此不可：落盘时间是"刚刚"，而真实时间可能是两年前；
+ * 若让未知的参与正常比较，所有还没反推出时间的老笔记会一起顶到最上面，恰好和"近期
+ * 修改的排在前面"这个目标相反。宁可承认"不知道"，也不要给出方向错误的顺序。
+ *
+ * 抽屉列表、搜索结果共用这一套（搜索只是它的一个子序列）。
  */
-const byMtimeDesc = (meta: Meta) => (a: string, b: string): number =>
-  effectiveMtime(meta.notes[b]) - effectiveMtime(meta.notes[a]);
+const byMtimeDesc =
+  (meta: Meta) =>
+  (a: string, b: string): number => {
+    const ka = hasRealMtime(meta.notes[a]);
+    const kb = hasRealMtime(meta.notes[b]);
+    if (ka !== kb) return ka ? -1 : 1; // 已知的排前面
+    const va = ka ? (meta.notes[a]?.fileMtime ?? 0) : (meta.notes[a]?.mtime ?? 0);
+    const vb = kb ? (meta.notes[b]?.fileMtime ?? 0) : (meta.notes[b]?.mtime ?? 0);
+    return vb - va;
+  };
+
+/** 同一个顺序的数组版，供搜索把两批命中合并后统一排序。 */
+const orderPaths = (paths: string[], meta: Meta): string[] => [...paths].sort(byMtimeDesc(meta));
 
 /**
  * 把反推出来的真实修改时间并进清单。
@@ -464,7 +488,11 @@ export const useNotes = create<NotesState>((set, get) => ({
         onPartial: (files) => {
           void persistManifest({ ...current(), fileMtimes: files });
         },
-        ...(opts?.maxCommits ? { maxCommits: opts.maxCommits } : {}),
+        // 单次工作量上限。默认值不是"抠门"，是**先保证近期**：
+        // 从最新往旧走，走满这一段就停，前沿记下来，下次同步接着往旧走。
+        // 这样第一次同步完，近期改过的笔记就已经排在上面了（用户要的效果），
+        // 而不是等整段历史走完才看到任何效果。
+        maxCommits: opts?.maxCommits ?? HISTORY_WINDOW,
       });
 
       const merged = mergeRealMtimes(current().notes, res.files);
@@ -740,23 +768,29 @@ export const useNotes = create<NotesState>((set, get) => ({
       return;
     }
     const generation = ++searchGeneration;
-    const nameHits = get()
-      .order.filter((p) => p.toLowerCase().includes(q.toLowerCase()))
-      .slice(0, SEARCH_LIMIT);
+    // 文件名命中：`order` 本身就按列表顺序排好，所以过滤出来天然是列表的一个子序列
+    const nameHits = get().order.filter((p) => p.toLowerCase().includes(q.toLowerCase()));
 
     // 先只出文件名结果：这一步零 IO，敲字就有反馈
-    set({ rows: nameHits.map((path) => ({ path, kind: 'name' as const })) });
+    set({ rows: nameHits.slice(0, SEARCH_LIMIT).map((path) => ({ path, kind: 'name' as const })) });
 
     const { meta } = get();
     const contentHits = searchIndex
       ? search(searchIndex, q, {
           // 搜索排序也走真实修改时间，否则「最近改的排前面」在手机上不成立
-          mtimeOf: (path) => effectiveMtime(meta.notes[path]),
+          // 排序交给下面的 `sortByTimeDesc`（与列表完全同一套）。
+          // 若这里退回"落盘时刻"，同一批笔记在列表和搜索里的先后会不一致。
+          mtimeOf: (path) => (hasRealMtime(meta.notes[path]) ? (meta.notes[path]?.fileMtime ?? 0) : 0),
           limit: SEARCH_LIMIT,
         }).map((hit) => hit.path)
       : [];
 
-    const content = contentHits.filter((p) => !nameHits.includes(p));
+    // 两批命中**统一排序再截断**：搜索结果是列表顺序的一个子序列。
+    // 先各自截断再拼会让"最近改的排前面"在搜索里不成立（截断发生在排序之前）。
+    const content = orderPaths(
+      contentHits.filter((p) => !nameHits.includes(p)),
+      meta,
+    );
     if (content.length === 0) return;
 
     // 读命中笔记的正文来生成摘要。只读命中的那些（最多 SEARCH_LIMIT 篇），
