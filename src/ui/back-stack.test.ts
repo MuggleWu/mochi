@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { BACK_LAYERS, decideBack, type BackContext } from './back-stack';
 
 /** 什么都没开：主页面，返回键应当交给系统（= 退出应用）。 */
-const idle: BackContext = { rename: false, sync: false, find: false, drawer: false, editing: false };
+const idle: BackContext = { menu: false, rename: false, sync: false, find: false, drawer: false, editing: false };
 
 const ctx = (over: Partial<BackContext>): BackContext => ({ ...idle, ...over });
 
@@ -23,6 +23,15 @@ describe('返回键优先级', () => {
 
   it('查找栏排在抽屉前面（临时浮层先关）', () => {
     expect(decideBack(ctx({ find: true, drawer: true }))).toEqual({ kind: 'close', layer: 'find' });
+  });
+
+  it('「更多」菜单开着 → 先收菜单（浮层最优先）', () => {
+    // 菜单是临时浮层，用户按返回是想关它；若判成 exit 就是一次误退应用
+    expect(decideBack(ctx({ menu: true }))).toEqual({ kind: 'close', layer: 'menu' });
+    expect(decideBack(ctx({ menu: true, drawer: true, editing: true }))).toEqual({
+      kind: 'close',
+      layer: 'menu',
+    });
   });
 
   it('编辑态 → 退回阅读态，绝不直接退出应用', () => {

@@ -7,7 +7,7 @@
  */
 
 /** 当前可能挡在最前面的东西。顺序即优先级，靠上优先被返回键收掉。 */
-export const BACK_LAYERS = ['rename', 'sync', 'find', 'drawer', 'editor'] as const;
+export const BACK_LAYERS = ['menu', 'rename', 'sync', 'find', 'drawer', 'editor'] as const;
 
 export type BackLayer = (typeof BACK_LAYERS)[number];
 
@@ -18,6 +18,8 @@ export interface BackContext {
   sync: boolean;
   /** 查找栏开着 */
   find: boolean;
+  /** 顶栏「更多」菜单开着 */
+  menu: boolean;
   /** 抽屉开着 */
   drawer: boolean;
   /** 处于编辑态 */
@@ -33,6 +35,7 @@ export type BackAction = { kind: 'close'; layer: BackLayer } | { kind: 'exit' };
  *
  * 两层排序的理由：
  *
+ * - `menu` 排在最前：同上理，浮层优先。
  * - `find` 排在 `drawer` 前：查找栏是临时浮层，用户按返回是想关它，
  *   而不是想把下面的抽屉一起收掉。
  * - `editor` 排在最后：编辑态按返回先退回阅读态（调用方**必须先保存**，
@@ -40,6 +43,9 @@ export type BackAction = { kind: 'close'; layer: BackLayer } | { kind: 'exit' };
  *   返回就把整个应用关掉，那是真丢东西。
  */
 export function decideBack(ctx: BackContext): BackAction {
+  // 菜单排最前：它是**临时浮层**，用户按返回几乎总是想关它。
+  // 排在 rename/sync 前也对 —— 那些是独立弹层，和菜单不会同时开着。
+  if (ctx.menu) return { kind: 'close', layer: 'menu' };
   if (ctx.rename) return { kind: 'close', layer: 'rename' };
   if (ctx.sync) return { kind: 'close', layer: 'sync' };
   if (ctx.find) return { kind: 'close', layer: 'find' };

@@ -671,3 +671,66 @@ body {
   background: #ffab3d;
   color: #1a1a1a;
 }
+
+/* ---- 顶栏「更多」菜单 ---- */
+/* 遮罩：透明但吃掉点击，用来实现"点别处就收"。放在菜单下面一层，菜单本身不受影响 */
+.menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+}
+
+/*
+  菜单开着时，遮罩会盖住整屏 —— 包括这个按钮自己。所以按钮必须**抬到遮罩之上**，
+  否则"再点一下收起"会失效（用户只会觉得按钮坏了）。这条是 jsdom 用例抓不到的：
+  那里没有真实命中测试，只有真浏览器才会暴露。
+*/
+.bar .menu-toggle {
+  position: relative;
+  z-index: 41;
+}
+
+.menu {
+  position: fixed;
+  top: calc(var(--bar-h) + 4px);
+  right: 8px;
+  z-index: 40;
+  min-width: 200px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgb(0 0 0 / 22%);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.menu-item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  font-size: 14px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.menu-item:active {
+  background: var(--bg-soft);
+}
+
+.menu-item:disabled {
+  color: var(--fg-dim);
+  opacity: 0.55;
+  cursor: default;
+}
+
+.menu-hint {
+  font-size: 11px;
+  color: var(--fg-dim);
+}

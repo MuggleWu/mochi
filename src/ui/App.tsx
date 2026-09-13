@@ -47,6 +47,7 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
   const setScrollRatio = useNotes((s) => s.setScrollRatio);
   const dismissError = useNotes((s) => s.dismissError);
   const syncStage = useNotes((s) => s.syncStage);
+  const copyCurrentNote = useNotes((s) => s.copyCurrentNote);
 
   const ui = useNotes((s) => s.ui);
   const setUi = useNotes((s) => s.setUi);
@@ -125,6 +126,7 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
         rename: st.ui.rename,
         sync: st.ui.sync,
         find: st.ui.find,
+        menu: st.ui.menu,
         drawer: st.drawerOpen,
         editing: st.mode === 'edit',
       });
@@ -133,6 +135,7 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
         return;
       }
       switch (action.layer) {
+        case 'menu':
         case 'rename':
         case 'sync':
         case 'find':
@@ -202,7 +205,47 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
             查找
           </button>
         )}
+        {/*
+          更多操作。做成一排竖点（而不是把"复制"直接摊成一个按钮）是为了**留出扩展位**：
+          往后加"导出""分享给…"这类操作时不必再动顶栏布局，也不必重新教育用户去哪找。
+        */}
+        <button
+          className="icon-btn menu-toggle"
+          onClick={() => setUi('menu', !ui.menu)}
+          aria-label="更多操作"
+          aria-haspopup="menu"
+          aria-expanded={ui.menu}
+        >
+          ⋮
+        </button>
       </header>
+
+      {/* 点菜单以外任何地方都收掉。用一次性监听而不是常驻：只在开着时挂，省得每次点击都过一遍 */}
+      {ui.menu && (
+        <>
+          <div className="menu-scrim" onClick={() => setUi('menu', false)} />
+          <div className="menu" role="menu">
+            <button
+              className="menu-item"
+              role="menuitem"
+              disabled={!current || !content.trim()}
+              onClick={() => void copyCurrentNote()}
+            >
+              复制当前笔记
+              <span className="menu-hint">标题 + 正文，可直接粘贴</span>
+            </button>
+            <button
+              className="menu-item"
+              role="menuitem"
+              disabled={!current || !content.trim()}
+              onClick={() => void copyCurrentNote({ withTitle: false })}
+            >
+              复制当前笔记（不含标题）
+              <span className="menu-hint">只要正文，避免标题重复</span>
+            </button>
+          </div>
+        </>
+      )}
 
       {error && (
         <div className="error-bar">

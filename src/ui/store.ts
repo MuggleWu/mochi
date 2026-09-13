@@ -29,6 +29,8 @@ const HISTORY_CONCURRENCY = CONCURRENCY;
  */
 const HISTORY_WINDOW = 150;
 import { FLAG, hasRealMtime } from '@core/sync/manifest';
+import { clipboardText, writeClipboardText } from '@core/clipboard';
+import { displayTitle } from '@core/paths';
 import { GithubClient, type FetchLike } from '@core/net/github';
 import { fetchSnapshot, reconcileSnapshot } from '@core/sync/pull-metadata';
 import { walkHistory } from '@core/history/mtime';
@@ -77,7 +79,7 @@ export interface NotesState {
    * 返回键的处理要按"最上面那层先关"的顺序来（见 `back-stack.ts`），而处理函数
    * 在 App 顶层，看不到子组件的局部状态。状态放这里，优先级才有一处可判。
    */
-  ui: { rename: boolean; sync: boolean; find: boolean };
+  ui: { rename: boolean; sync: boolean; find: boolean; menu: boolean };
   error: string | null;
   toast: string | null;
   /** 同步配置（仓库/分支/令牌）。令牌只在内存与私有文件里。 */
@@ -147,7 +149,13 @@ export interface NotesState {
   setScrollRatio(r: number): void;
   dismissError(): void;
   /** 开/关某个界面层（返回键与界面按钮共用同一处状态）。 */
-  setUi(key: 'rename' | 'sync' | 'find', open: boolean): void;
+  setUi(key: 'rename' | 'sync' | 'find' | 'menu', open: boolean): void;
+  /**
+   * 把当前笔记复制到系统剪贴板，供用户贴到别的应用里发给别人。
+   *
+   * `withTitle` 默认 true：贴出去时没有标题的正文常常读不懂。
+   */
+  copyCurrentNote(options?: { withTitle?: boolean }): Promise<void>;
   /** 主动报一个错（内链找不到目标、按需拉取失败等）。 */
   setError(message: string | null): void;
   /**
@@ -297,7 +305,7 @@ export const useNotes = create<NotesState>((set, get) => ({
   indexed: 0,
   indexing: false,
   scrollRatio: 0,
-  ui: { rename: false, sync: false, find: false },
+  ui: { rename: false, sync: false, find: false, menu: false },
   error: null,
   toast: null,
   settings: { ...DEFAULT_SETTINGS },
@@ -749,6 +757,20 @@ export const useNotes = create<NotesState>((set, get) => ({
   },
   setScrollRatio(scrollRatio) {
     set({ scrollRatio });
+  },
+  async copyCurrentNote(options) {
+    const { current, content } = get();
+    if (!current) {
+      set({ toast: '还没有打开任何笔记' });
+      return;
+    }
+    try {
+      await writeClipboardText(clipboardText(displayTitle(current), content, options));
+      set({ ui: { ...get().ui, menu: false }, toast: '已复制，可以去别的应用粘贴了' });
+    } catch (e) {
+      // 复制失败必须说出来：让用户以为复制成功、结果粘出空内容，比直接报错糟得多
+      set({ error: `复制失败：${e instanceof Error ? e.message : String(e)}` });
+    }
   },
   dismissError() {
     set({ error: null });
