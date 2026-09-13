@@ -41,7 +41,7 @@ function Row({ k, v, warn }: { k: string; v: string; warn?: boolean }): React.JS
   return (
     <div style={row}>
       <span style={key}>{k}</span>
-      <span style={{ ...val, ...(warn ? { color: 'var(--danger, #c0392b)' } : {}) }}>{v}</span>
+      <span style={{ ...val, ...(warn ? { color: 'var(--danger)' } : {}) }}>{v}</span>
     </div>
   );
 }
@@ -147,7 +147,7 @@ export function SelfCheckPage({ onClose }: { onClose: () => void }): React.JSX.E
               )}
             </>
           ) : checkError ? (
-            <div style={{ fontSize: 13, color: 'var(--danger, #c0392b)' }}>自检跑不动：{checkError}</div>
+            <div style={{ fontSize: 13, color: 'var(--danger)' }}>自检跑不动：{checkError}</div>
           ) : (
             <div style={{ fontSize: 13, color: 'var(--fg-dim)' }}>正在数…</div>
           )}
@@ -176,7 +176,7 @@ export function SelfCheckPage({ onClose }: { onClose: () => void }): React.JSX.E
 
         <div style={box}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>上次错误</div>
-          <div style={{ fontSize: 13, color: error ? 'var(--danger, #c0392b)' : 'var(--fg-dim)' }}>
+          <div style={{ fontSize: 13, color: error ? 'var(--danger)' : 'var(--fg-dim)' }}>
             {error ?? '没有记录到错误'}
           </div>
         </div>

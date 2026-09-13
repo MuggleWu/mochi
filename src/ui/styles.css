@@ -17,6 +17,8 @@
   --fg-dim: #6b6b70;
   --line: #e5e5ea;
   --accent: #2f6fed;
+  /* 错误色与 `.error-bar` 的底色同源，诊断页用它标出需要注意的项 */
+  --danger: #b3261e;
   /*
    * 软键盘占位。原生侧（MainActivity）只改 WebView 自己的 bottomMargin，那才是
    * "看得见正在打的字"的关键；这里是网页侧的兜底，给老 Android WebView 用
@@ -61,6 +63,8 @@
     --fg-dim: #9a9aa2;
     --line: #2c2c31;
     --accent: #5b8dff;
+    /* 深色下要提亮：`#b3261e` 在近黑底上几乎看不清 */
+    --danger: #ff6b5e;
   }
 }
 
