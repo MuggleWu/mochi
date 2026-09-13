@@ -50,6 +50,7 @@ const HISTORY_MAX_PASSES = 8;
 import { FLAG, hasRealMtime } from '@core/sync/manifest';
 import { clipboardText, writeClipboardText } from '@core/clipboard';
 import { pushMessage, pushNotes, pathsToPush } from '@core/sync/push';
+import { conflictsOf, withConflicts, type ConflictItem } from '@core/sync/conflict';
 import { deserializeSession, serializeSession, type SessionState } from '@core/fs/session';
 import { displayTitle } from '@core/paths';
 import { GithubClient, humanizeWait, type FetchLike } from '@core/net/github';
@@ -124,6 +125,8 @@ export interface NotesState {
    * （读一遍本地笔记），启动时不该干这个。
    */
   pushDirty: number;
+  /** 待决冲突（手机和电脑都改过同一篇），界面据此提示用户定哪边为准。 */
+  conflicts: ConflictItem[];
   /** 上次同步的摘要，用于顶栏提示。 */
   lastSyncNote: string;
 
@@ -270,6 +273,7 @@ let searchIndex: SearchIndex | null = null;
  * "我写的就是最新版"和"我写的是旧版、期间又变了"，会把未落盘的改动误标成已保存。
  */
 let indexVersion = 0;
+
 /** 已落盘的版本号。 */
 let indexSavedVersion = 0;
 /** 正在跑的那次"全量建索引"。并发触发时直接复用，不叠第二份。 */
@@ -563,6 +567,7 @@ export const useNotes = create<NotesState>((set, get) => ({
   syncStage: '',
   pushStage: '',
   pushDirty: 0,
+  conflicts: [],
   lastSyncNote: '',
   pullStage: '',
   pullDone: 0,
@@ -680,17 +685,29 @@ export const useNotes = create<NotesState>((set, get) => ({
       }
       set({ syncStage: '并入本地清单' });
       const next = reconcileSnapshot(meta, snap);
+      /*
+       * 顺手认一遍冲突（手机和电脑都改过同一篇）。
+       *
+       * 在这里认而不是只在推送时认：冲突的后果是"这一篇怎么都推不上去、也不报错"，
+       * 而那要等到用户点推送才会暴露 —— 用户可能几天后才推，期间一直以为改动好好的。
+       * 拉取是每次打开都会走的路径，在这儿认出来就能马上告诉他。
+       */
+      const conflicts = conflictsOf(diffWithRemote(next, remoteNotesOf(next), Object.keys(next.notes)), next);
       const order = Object.keys(next.notes).sort(byMtimeDesc(next));
       const pending = pendingContentCount(next);
       set({
-        meta: next,
+        meta: withConflicts(next, conflicts),
+        conflicts,
         order,
         syncStage: '',
         lastSyncNote: `已读取 ${snap.files.length} 篇笔记的清单，待下载内容 ${pending} 篇`,
-        toast: `远端共 ${snap.files.length} 篇笔记`,
+        toast:
+          conflicts.length > 0
+            ? `共有 ${conflicts.length} 篇与电脑上的改动撞车，需要你定哪边为准`
+            : `远端共 ${snap.files.length} 篇笔记`,
         pendingContent: pending,
       });
-      await persistManifest(next);
+      await persistManifest(get().meta);
       // 清单就位后**不 await**：列表此刻已经可用，内容下载是后台的事。
       // 让它接着跑，用户马上就能打开最近的笔记（D4 的"能立刻用"）。
       //
@@ -1208,6 +1225,7 @@ export const useNotes = create<NotesState>((set, get) => ({
       }
       set({
         meta,
+        conflicts: conflictsOf(diffWithRemote(meta, remoteNotesOf(meta), localPaths), meta),
         order: Object.keys(meta.notes).sort(byMtimeDesc(meta)),
         pendingContent: pendingContentCount(meta),
         pushDirty: pathsToPush(diffWithRemote(meta, remoteNotesOf(meta), localPaths)).length,
@@ -1221,6 +1239,32 @@ export const useNotes = create<NotesState>((set, get) => ({
       // 它刚被上面的 reconcile 对齐过，所以和直接读远端树等价，但**不用再下一次树**。
       const diff = diffWithRemote(meta, remoteNotesOf(meta), localPaths);
       const count = pathsToPush(diff).length + diff.deletedLocally.length;
+
+      /*
+       * **有冲突就拒绝推送。**
+       *
+       * 为什么不在这儿做"以哪边为准"的选择：mochi 是**辅助**软件，手机上本来就不该做
+       * 多少编辑，而两个版本都是用户自己写的、哪边更重要只有他知道 —— 整篇覆盖型的
+       * 二选一在手机上很难看清后果。所以这里只把撞车的篇目列清楚，请他回电脑上理顺，
+       * 之后在手机上拉一次，那几篇会被远端版本覆盖（拉取本来就按 sha 不同来挑，
+       * 不需要额外机制）。
+       *
+       * `pathsToPush` 本来就不会带上冲突的篇目，所以即使放行也不会覆盖远端 ——
+       * 但那样会变成"静默少推几篇"，用户以为推成功了。宁可明确拒绝。
+       */
+      const blocked = conflictsOf(diff, meta);
+      if (blocked.length > 0) {
+        const names = blocked.slice(0, 3).map((c) => `《${displayTitle(c.path)}》`).join('、');
+        const more = blocked.length > 3 ? ` 等 ${blocked.length} 篇` : '';
+        set({
+          pushStage: '',
+          conflicts: blocked,
+          error:
+            `${names}${more}在手机上和在电脑上都被改过，没法判断该留哪一份，所以这次没有推送。\n` +
+            '请先在电脑上把这几篇理顺并同步，再回到手机上点一次同步 —— 那几篇会被电脑上的版本覆盖。',
+        });
+        return;
+      }
 
       set({ pushStage: `推送 ${count} 篇改动` });
       const outcome = await pushNotes({
