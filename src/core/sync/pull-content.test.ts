@@ -26,10 +26,14 @@ describe('planDownloads', () => {
     expect(plan.pendingTotal).toBe(2);
   });
 
-  it('保持传入顺序（调用方已按 mtime 倒序，这里不能乱排）', () => {
-    const order = ['新.md', '中.md', '旧.md'];
-    const notes = { '新.md': note('', '1'), '中.md': note('', '2'), '旧.md': note('', '3') };
-    expect(planDownloads({ order, notes }).paths).toEqual(['新.md', '中.md', '旧.md']);
+  it('保持传入顺序（排序是调用方的事，这里不能乱排）', () => {
+    // 注意别把这里读成"首屏一定会挑到最近编辑的笔记"——**不是**。
+    // 调用方按 mtime 排，而 mtime 是"下到本机的时刻"；首启时全部条目的 mtime
+    // 还都是同一个同步时刻，排了等于没排，于是实际拿到的就是树里的前 300 篇。
+    // 这是已知限制，README「时间戳」一节有说明。
+    const order = ['甲.md', '乙.md', '丙.md'];
+    const notes = { '甲.md': note('', '1'), '乙.md': note('', '2'), '丙.md': note('', '3') };
+    expect(planDownloads({ order, notes }).paths).toEqual(['甲.md', '乙.md', '丙.md']);
   });
 
   it('limit 截断到前 N 篇，但 pendingTotal 报的是全部待下载数', () => {
