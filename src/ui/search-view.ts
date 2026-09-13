@@ -75,8 +75,12 @@ export function snippetFor(raw: string, word: string): { snippet: string; hl?: [
   if (compactAt >= 0) {
     return { snippet: body, hl: [compactAt, compactAt + needle.length] };
   }
-  const firstAt = needle ? body.toLowerCase().indexOf(needle.slice(0, 1)) : -1;
-  if (firstAt >= 0) return { snippet: body, hl: [firstAt, firstAt + 1] };
+  /*
+   * 整词在**压过空白的片段**里仍然找不到（说明它被 markdown 拆开了，例如
+   * `**个人**所得税`）。这时**宁可不高亮，也不要把某个字圈出来充数** ——
+   * 早先的写法是退回高亮 needle 的第一个字符，于是搜十一位号码会因正文里随便
+   * 一个 `1` 就画出一条下划线，看起来像命中、其实毫无关系。用户会以为自己记错了。
+   */
   body = body.trim();
   return { snippet: body };
 }
