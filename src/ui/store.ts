@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand';
 import type { FileStore } from '@core/fs/store';
-import { MANIFEST_FILE } from '@core/fs/layout';
+import { MANIFEST_FILE, SESSION_FILE } from '@core/fs/layout';
 import { NotesRepo } from '@core/repo/notes-repo';
 import {
   emptyMeta,
@@ -30,6 +30,7 @@ const HISTORY_CONCURRENCY = CONCURRENCY;
 const HISTORY_WINDOW = 150;
 import { FLAG, hasRealMtime } from '@core/sync/manifest';
 import { clipboardText, writeClipboardText } from '@core/clipboard';
+import { deserializeSession, serializeSession, type SessionState } from '@core/fs/session';
 import { displayTitle } from '@core/paths';
 import { GithubClient, type FetchLike } from '@core/net/github';
 import { fetchSnapshot, reconcileSnapshot } from '@core/sync/pull-metadata';
@@ -156,6 +157,12 @@ export interface NotesState {
    * `withTitle` 默认 true：贴出去时没有标题的正文常常读不懂。
    */
   copyCurrentNote(options?: { withTitle?: boolean }): Promise<void>;
+  /**
+   * 把"离开时的样子"写进磁盘，供下次打开时还原。
+   *
+   * 落盘时机由调用方决定（App 在切后台/退到后台时调），见 `session-state.ts` 的说明。
+   */
+  saveSession(): Promise<void>;
   /** 主动报一个错（内链找不到目标、按需拉取失败等）。 */
   setError(message: string | null): void;
   /**
@@ -264,6 +271,49 @@ const byMtimeDesc =
 const orderPaths = (paths: string[], meta: Meta): string[] => [...paths].sort(byMtimeDesc(meta));
 
 /**
+ * 还原"离开时的样子"。
+ *
+ * 三条纪律：
+ *
+ * 1. **清单里没有的笔记一律不还原**。它可能在电脑上被删/改名了，指着一个不存在的路径
+ *    只会让用户看到一篇空白，比直接停在空态更让人迷惑。清掉，当作没开过。
+ * 2. **有草稿就用草稿**，不读盘 —— 那正是"还没保存的改动"，读盘等于把它抹掉。
+ * 3. **任何一步失败都静默降级**（读不到文件、JSON 坏了）。还原是便利，不能让应用起不来。
+ */
+async function restoreSession(fs: FileStore): Promise<void> {
+  const get = (): NotesState => useNotes.getState();
+  const set = (patch: Partial<NotesState>): void => useNotes.setState(patch);
+  let saved: SessionState;
+  try {
+    saved = deserializeSession(await fs.readText(SESSION_FILE));
+  } catch {
+    return;
+  }
+  if (!saved.current) {
+    // 当时没开笔记：搜索词这种"下次还用得上"的照样还原，抽屉不会因此打开
+    if (saved.query) set({ query: saved.query });
+    return;
+  }
+  const st = get();
+  if (!st.meta.notes[saved.current]) return;
+
+  let content = saved.draft ?? '';
+  if (saved.draft === null) {
+    content = (await repo?.readTextIfPresent(saved.current)) ?? '';
+  }
+  set({
+    current: saved.current,
+    content,
+    mode: saved.mode,
+    dirty: saved.draft !== null, // 草稿还没落盘 → 仍然是"改过没保存"
+    scrollRatio: saved.scrollRatio,
+    query: saved.query,
+    // 抽屉一律不还原：回来时用户要看的是**笔记**，不是盖住笔记的目录
+    drawerOpen: false,
+  });
+}
+
+/**
  * 把反推出来的真实修改时间并进清单。
  *
  * **只接受更新的**：一次遍历里"越新的段越先算"，所以同一路径多次出现时最大值就是
@@ -357,6 +407,9 @@ export const useNotes = create<NotesState>((set, get) => ({
 
     // 索引：先同步读盘（几 MB，几十毫秒，这部分等得起），建索引则丢到后台。
     // 为什么不在启动路径里建：一万篇实测十几秒，绝不能卡住"打开就能读"。
+    // 回到离开时的样子。放在清单之后：只有清单就绪才谈得上"这篇笔记还在不在"。
+    await restoreSession(fs);
+
     const loaded = await loadIndex(fs);
     searchIndex = loaded.index;
     set({ indexed: searchIndex.docIdOf.size });
@@ -561,6 +614,7 @@ export const useNotes = create<NotesState>((set, get) => ({
     }
     set({ meta: next, order: Object.keys(next.notes).sort(byMtimeDesc(next)), current: entry.path, content: '', mode: 'edit', dirty: true });
     await persistManifest(next);
+    void get().saveSession(); // 新笔记马上就成了"当前在看的这篇"，状态要跟上去
   },
 
   async openNote(path: string) {
@@ -576,6 +630,9 @@ export const useNotes = create<NotesState>((set, get) => ({
         drawerOffset: null,
         scrollRatio: 0,
       });
+      // 打开哪篇就记哪篇：不能只靠"切后台时保存"那一次 —— Android 给 onPause 写完磁盘的
+      // 窗口很短，异步写入可能没落完。状态一变就尽早写一次，最坏情况丢的也只是一小段。
+      void get().saveSession();
       return;
     }
 
@@ -619,6 +676,7 @@ export const useNotes = create<NotesState>((set, get) => ({
         scrollRatio: 0,
         openingNote: false,
       });
+      void get().saveSession(); // 同上：按需拉下来的这篇也立刻记成"当前在看的"
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const hint = (err as { hint?: string }).hint;
@@ -674,6 +732,8 @@ export const useNotes = create<NotesState>((set, get) => ({
     const next = { ...meta, notes };
     set({ meta: next, order: Object.keys(notes).sort(byMtimeDesc(next)), current: r.to, toast: `已改名为《${r.to}》` });
     await persistManifest(next);
+    // 路径变了，状态里的 current 必须跟着搬；否则下次打开会指向一个不存在的旧路径
+    void get().saveSession();
   },
 
   async deleteNote() {
@@ -685,11 +745,15 @@ export const useNotes = create<NotesState>((set, get) => ({
     delete notes[current];
     const next = { ...meta, notes };
     set({ meta: next, order: Object.keys(notes).sort(byMtimeDesc(next)), current: null, content: '', toast: `《${current}》已移入回收站` });
+    // 当前笔记已经不在清单里了，状态里不能留着它（还原时会指向不存在的路径）
+    void get().saveSession();
     await persistManifest(next);
   },
 
   setMode(mode) {
     set({ mode });
+    // 阅读/编辑态是"离开时的样子"的一部分，切了就记一次
+    void get().saveSession();
   },
   setDrawer(open) {
     // 点汉堡进来：从屏幕外滑到位。
@@ -757,6 +821,23 @@ export const useNotes = create<NotesState>((set, get) => ({
   },
   setScrollRatio(scrollRatio) {
     set({ scrollRatio });
+  },
+  async saveSession() {
+    if (!store) return;
+    const { current, content, mode, dirty, scrollRatio, query } = get();
+    const state: SessionState = {
+      current,
+      mode,
+      scrollRatio,
+      query,
+      // 只有"改过且没保存"才存草稿：否则每次切后台都要写一遍整篇正文，白费 IO
+      draft: dirty ? content : null,
+    };
+    try {
+      await store.writeText(SESSION_FILE, serializeSession(state));
+    } catch {
+      // 存不上就算了：这是"下次回到原处"的便利，不该因为磁盘问题打断用户当前的操作
+    }
   },
   async copyCurrentNote(options) {
     const { current, content } = get();

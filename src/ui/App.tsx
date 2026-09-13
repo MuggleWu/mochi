@@ -111,6 +111,71 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
   }, [toast]);
 
   /**
+   * 离开时把"当前的样子"写进磁盘，回来时（`store.init` 里的 `restoreSession`）接着用。
+   *
+   * 为什么要落盘而不是只靠内存：Android 会因内存压力**杀掉后台的 WebView**。
+   * 真被杀掉时，只有磁盘上的那份还在。
+   *
+   * 三个触发点，各有各的用途：
+   *
+   * - `pause`：网页被退到后台。这是**最可靠的一次**（进程随后可能就没了）。
+   * - `appStateChange`：WebView 没走 pause 流程时的兜底（不同机型/版本行为不一致）。
+   * - `visibilitychange` + 内存标志：浏览器里的等价物，顺便覆盖"切到别的标签页"。
+   *
+   * 保存是异步的，Android 不保证等它写完 —— 所以**不能只靠这一下**。编辑时另有防抖落盘
+   * （见下面的 effect），两者合起来才能保证最坏情况下丢的也只是最后一两秒的输入。
+   */
+  useEffect(() => {
+    const flush = (): void => {
+      void useNotes.getState().saveSession();
+    };
+    const handles: { remove(): Promise<void> }[] = [];
+    void CapApp.addListener('pause', flush).then((h) => handles.push(h));
+    void CapApp.addListener('appStateChange', ({ isActive }) => {
+      if (!isActive) flush();
+    }).then((h) => handles.push(h));
+
+    const onHidden = (): void => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    document.addEventListener('visibilitychange', onHidden);
+    // iOS/部分 Android 上切后台时 `pagehide` 比 visibilitychange 先到，两个都听
+    window.addEventListener('pagehide', flush);
+    return () => {
+      for (const h of handles) void h.remove();
+      document.removeEventListener('visibilitychange', onHidden);
+      window.removeEventListener('pagehide', flush);
+    };
+  }, []);
+
+  /**
+   * 阅读位置：停下 1 秒就落一次盘。
+   *
+   * 滚动是高频的（每帧都可能变），所以**不能**在 `setScrollRatio` 里直接写 —— 那等于每帧一次
+   * 磁盘写入。防抖之后，用户停下来才写。
+   */
+  useEffect(() => {
+    if (!current) return;
+    const t = setTimeout(() => void useNotes.getState().saveSession(), 1000);
+    return () => clearTimeout(t);
+  }, [current, scrollRatio]);
+
+  /**
+   * 编辑中的草稿：改动停下 800ms 就落一次盘。
+   *
+   * 只靠"切后台时保存"不够 —— 若进程是被直接杀掉的（没走 pause），最后那段输入就没了。
+   * 800ms 是"打字时几乎无感、停下又能马上写下去"的折中；实测写入是几 KB 的私有文件，
+   * 代价可以忽略。
+   *
+   * 只在**真的有未保存改动**时才写：阅读态来回滚动不该碰磁盘。
+   */
+  useEffect(() => {
+    if (!dirty) return;
+    const t = setTimeout(() => void useNotes.getState().saveSession(), 800);
+    return () => clearTimeout(t);
+  }, [dirty, content]);
+
+  /**
    * Android 返回键。
    *
    * 不处理的话它走 Capacitor 默认行为 = **直接退出应用**，于是"抽屉开着按返回"

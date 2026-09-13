@@ -15,3 +15,4 @@ export const GRAMS_FILE = `${STATE_DIR}/grams.bin`;
 
 export const noteFile = (path: string): string => `${NOTES_DIR}/${path}`;
 export const trashFile = (name: string): string => `${TRASH_DIR}/${name}`;
+export const SESSION_FILE = `${STATE_DIR}/session.json`;
