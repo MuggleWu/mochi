@@ -122,6 +122,12 @@ export interface NotesState {
   pendingContent: number;
   /** 内容拉取是否暂停。 */
   pullPaused: boolean;
+  /**
+   * 额度恢复、自动续下的时刻（毫秒时间戳；0 = 没有排着自动续下）。
+   *
+   * 给界面用：显示"X 后自动接着下"，也让"回到前台时补一次检查"有依据。
+   */
+  pullResumeAt: number;
   /** 正在单独拉取某一篇（L3 按需）。 */
   openingNote: boolean;
   /** 整理版本历史的进度：已完成段数 / 总段数（0/0 = 没在整理）。 */
@@ -160,6 +166,14 @@ export interface NotesState {
   syncNow(): Promise<void>;
   /** 暂停内容拉取（当前批次跑完即停，已下好的保留）。 */
   pauseContent(): void;
+  /**
+   * 补一次"到点该接着下了吗"的检查。
+   *
+   * 定时器只是**主路**：Android 会把后台的 WebView 挂起，挂起期间定时器不走，
+   * 回到前台时可能早就过了恢复时刻。所以前台恢复时调一次这里兜底 ——
+   * 两条路谁都行，先到的那条负责续上。
+   */
+  resumePullIfDue(): void;
   /** 单篇内容到位后并入清单（下载与按需拉取共用）。 */
   setNoteEntry(entry: NoteEntry): void;
   createNote(): Promise<void>;
@@ -304,6 +318,27 @@ async function flushIndex(): Promise<void> {
 }
 /** 内容拉取是否被要求暂停。放模块级：循环里每次都要读，且暂停必须在当前批次后立刻生效。 */
 let pullStopRequested = false;
+
+/**
+ * "到点自动接着下"的定时器。
+ *
+ * 额度是按小时窗口算的，用完之后只能等。等的过程没必要让用户盯着、到点再手动点一下 ——
+ * 所以这里排一个定时器自动续上。
+ *
+ * `pullResumeGen` 是它的世代号：用户按暂停、或新一次拉取开始，都要把在途的这次续期
+ * **作废**。否则会出现"用户明明按了暂停，几分钟后它自己又跑起来"。
+ */
+let pullResumeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 下一次 `setTimeout` 调用是否属于"自动续下"。
+ *
+ * 为什么需要这个标志：测试要抓住**这一个**定时器，而按"时长"去认是靠不住的 ——
+ * 重试退避也会排到一分钟，跟额度等待的区间重叠。在调用点插一个标志，识别就与时长无关，
+ * 将来等多久都不会失效。
+ */
+export let __nextTimeoutIsAutoResume = false;
+let pullResumeGen = 0;
 /**
  * 正在跑的那次内容拉取。放模块级而不是 state：Promise 不该进渲染状态，
  * 但"等它跑完"是外部（端到端自测、同步收尾）真实需要的，所以留一个可等待的句柄。
@@ -319,6 +354,51 @@ let pullGeneration = 0;
 let histRun: Promise<void> | null = null;
 
 /** 起一次历史整理并记下句柄；已经在跑就不重复起。 */
+/**
+ * 取消已排的"自动续下"。
+ *
+ * 每次取消都让世代号 +1：即使定时器已经进入回调、正在等调度，它醒来时也会发现自己过期了。
+ * 只 `clearTimeout` 是不够的 —— 回调可能已经在队列里。
+ */
+function cancelAutoResume(): void {
+  pullResumeGen += 1;
+  if (pullResumeTimer !== null) {
+    clearTimeout(pullResumeTimer);
+    pullResumeTimer = null;
+  }
+}
+
+/**
+ * 排一次"到点自动接着下"。
+ *
+ * 两个真机上的坑要处理：
+ * 1. **后台定时器会被冻结**：Android 把 WebView 挂起后定时器不走，回到前台时可能早就过了
+ *    恢复时刻。所以这里既排定时器，也让 `App` 在回到前台时调 `resumeIfDue()` 补一次检查 ——
+ *    两条路都能续上，谁先到算谁。
+ * 2. **重置时刻可能已经过去**（例如离得很近、或刚被冻结过）：那就直接续，不要白等一个负的时长。
+ */
+function scheduleAutoResume(at: number): void {
+  cancelAutoResume();
+  const gen = pullResumeGen;
+  const wait = Math.max(0, at - Date.now());
+  // 夹到定时器的 32 位上限：额度窗口最多一小时、远在其内，但时刻被传得很远时不该溢出
+  const capped = Math.min(wait, 2 ** 31 - 1);
+  __nextTimeoutIsAutoResume = true;
+  pullResumeTimer = setTimeout(() => {
+    pullResumeTimer = null;
+    if (gen !== pullResumeGen) return; // 已被取消（用户暂停 / 新一次拉取）
+    const st = useNotes.getState();
+    if (st.pullStage) return; // 已经在拉，别叠第二份
+    if (pendingContentCount(st.meta) === 0) {
+      useNotes.setState({ pullResumeAt: 0 });
+      return;
+    }
+    useNotes.setState({ pullResumeAt: 0 });
+    void useNotes.getState().pullContent();
+  }, capped);
+  __nextTimeoutIsAutoResume = false;
+}
+
 function startRefreshMtimes(opts?: { maxCommits?: number }): Promise<void> {
   if (histRun) return histRun; // 已经在整理，复用同一份，不叠第二次
   const run = useNotes.getState().refreshMtimes(opts);
@@ -474,6 +554,7 @@ export const useNotes = create<NotesState>((set, get) => ({
   pullTotal: 0,
   pendingContent: 0,
   pullPaused: false,
+  pullResumeAt: 0,
   openingNote: false,
   histDone: 0,
   histTotal: 0,
@@ -718,7 +799,37 @@ export const useNotes = create<NotesState>((set, get) => ({
     await run;
   },
 
+  resumePullIfDue() {
+    const { pullResumeAt, pullStage, meta, settings } = get();
+    if (pullResumeAt <= 0) return; // 没排着自动续下，什么都不做
+    if (pullStage !== '') return; // 正在拉，别叠第二份
+    /*
+     * 用 `pullStopRequested` 而不是 `pullPaused` 判断"用户叫停"。
+     *
+     * 额度用完时 `pullPaused` 也是 true（意思是"还有欠账、等着"），拿它当判据会把
+     * 自动续下自己挡住 —— 而这时**恰恰是应该续**的时候。`pullStopRequested` 只由
+     * `pauseContent()` 置位，才是"用户明确叫停"。
+     */
+    if (pullStopRequested) return;
+    if (!isConfigured(settings)) return;
+    if (Date.now() < pullResumeAt) {
+      // 时刻还没到（定时器可能被冻结了），重新排一次，别让它永远醒不来
+      scheduleAutoResume(pullResumeAt);
+      return;
+    }
+    if (pendingContentCount(meta) === 0) {
+      set({ pullResumeAt: 0 });
+      return;
+    }
+    cancelAutoResume();
+    set({ pullResumeAt: 0 });
+    void get().pullContent();
+  },
+
   pauseContent() {
+    // 作废在途的自动续期：用户明确按了暂停，几分钟后它自己又跑起来是最坏的体验
+    cancelAutoResume();
+    set({ pullResumeAt: 0 });
     // 只置标记：runDownloads 会在当前批次跑完后自然退出，已下好的保留
     pullStopRequested = true;
     set({ pullPaused: true });
@@ -1329,7 +1440,9 @@ async function doPullContent(options?: { limit?: number }): Promise<void> {
   const limit = options?.limit;
   // 新一代开始就把上一代的暂停标记清掉：否则用户"暂停后再继续"会被旧标记立刻停住
   pullStopRequested = false;
-  set({ pullPaused: false });
+  // 同时作废在途的自动续期：这一次已经在跑了，不需要它再来叫一遍
+  cancelAutoResume();
+  set({ pullPaused: false, pullResumeAt: 0 });
 
   const client = new GithubClient({
     token: state.settings.token,
@@ -1407,8 +1520,10 @@ async function doPullContent(options?: { limit?: number }): Promise<void> {
     // 三种收尾要分开说：用户按了暂停、额度用完、正常下完。
     // 混成一句含糊的"已暂停"，用户就不知道"是我停的？还是坏了？还要不要管它？"
     const quotaWait = quotaPausedUntil ? humanizeWait(Math.max(0, quotaPausedUntil - Date.now())) : '';
+    // 额度用完了、而且确实还有欠账 → 排一次自动续下，到点自己接着跑，不用用户盯着
+    const willAutoResume = Boolean(quotaPausedUntil) && pending > 0;
     const note = quotaPausedUntil
-      ? `本小时额度用完：本次下好 ${totalOk} 篇，还差 ${pending} 篇，${quotaWait}后接着下`
+      ? `本小时额度用完：本次下好 ${totalOk} 篇，还差 ${pending} 篇，${quotaWait}后自动接着下`
       : stopped
         ? `已暂停：本次下好 ${totalOk} 篇，还差 ${pending} 篇`
         : `内容已就绪：本次下好 ${totalOk} 篇${totalFailed ? `，${totalFailed} 篇失败` : ''}，还差 ${pending} 篇`;
@@ -1416,9 +1531,12 @@ async function doPullContent(options?: { limit?: number }): Promise<void> {
       pullStage: '',
       pendingContent: pending,
       pullPaused: (stopped || Boolean(quotaPausedUntil)) && pending > 0,
+      pullResumeAt: willAutoResume ? quotaPausedUntil : 0,
       lastSyncNote: note,
       ...(totalOk > 0 && !stopped && !quotaPausedUntil ? { toast: `已下载 ${totalOk} 篇笔记内容` } : {}),
     });
+    if (willAutoResume) scheduleAutoResume(quotaPausedUntil);
+    else cancelAutoResume();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const hint = (err as { hint?: string }).hint;

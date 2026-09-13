@@ -133,7 +133,17 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
     const handles: { remove(): Promise<void> }[] = [];
     void CapApp.addListener('pause', flush).then((h) => handles.push(h));
     void CapApp.addListener('appStateChange', ({ isActive }) => {
-      if (!isActive) flush();
+      if (!isActive) {
+        flush();
+        return;
+      }
+      /*
+       * 回到前台补一次"到点该接着下了吗"。
+       *
+       * 内容下载排了自动续下（额度恢复后自己接着跑），但 Android 会挂起后台的 WebView，
+       * 挂起期间定时器不走 —— 不补这一下，用户切回来时会看到它还傻等着。
+       */
+      useNotes.getState().resumePullIfDue();
     }).then((h) => handles.push(h));
 
     const onHidden = (): void => {
