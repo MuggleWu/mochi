@@ -202,18 +202,55 @@ describe('失败分类与提示', () => {
     await expect(client.getRefHead()).rejects.toMatchObject({ kind: 'network' });
   });
 
-  it('限流会重试，成功即返回', async () => {
+  it('配额用尽不重试：重试是白费，还会把浪费乘以三', async () => {
+    // 实测踩过：撞上每小时配额上限后，每个请求都要再重试两次，
+    // 而"这一小时没额度了"重试多少次都没用 —— 纯粹的浪费，还刷屏错误。
     const { client, fake } = makeClient([
       {
         match: '/git/ref/heads/master',
         responses: [
-          { status: 403, text: 'API rate limit exceeded', headers: { 'retry-after': '0' } },
+          {
+            status: 403,
+            text: 'API rate limit exceeded for user ID 1',
+            headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '9999999999' },
+          },
+          { json: { object: { sha: 'ok' } } }, // 若真重试了，这里会成功、测试就会露馅
+        ],
+      },
+    ]);
+    await expect(client.getRefHead()).rejects.toThrow('额度已用完');
+    expect(fake.count('/git/ref')).toBe(1);
+  });
+
+  it('次级限流（请求太密）仍然重试 —— 它几秒就恢复', async () => {
+    const { client, fake } = makeClient([
+      {
+        match: '/git/ref/heads/master',
+        responses: [
+          { status: 403, text: 'You have exceeded a secondary rate limit', headers: { 'retry-after': '0' } },
           { json: { object: { sha: 'ok' } } },
         ],
       },
     ]);
     expect(await client.getRefHead()).toBe('ok');
     expect(fake.count('/git/ref')).toBe(2);
+  });
+
+  it('每个响应都记下剩余额度（否则撞墙前毫无察觉）', async () => {
+    const { client } = makeClient([
+      {
+        match: '/git/ref/heads/master',
+        responses: [
+          {
+            json: { object: { sha: 'ok' } },
+            headers: { 'x-ratelimit-remaining': '4321', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '1700000000' },
+          },
+        ],
+      },
+    ]);
+    expect(client.remainingQuota).toBeNull(); // 还没发过请求就不猜
+    await client.getRefHead();
+    expect(client.remainingQuota).toEqual({ remaining: 4321, limit: 5000, resetAt: 1_700_000_000_000 });
   });
 
   it('幂等请求遇 500 会重试，写请求不会重复提交', async () => {

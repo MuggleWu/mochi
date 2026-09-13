@@ -28,6 +28,49 @@ export type FailureKind =
   | 'truncated'
   | 'bad-response';
 
+/**
+ * 这一小时的配额还剩多少。
+ *
+ * GitHub 在每个响应里都带这几个头，**不看就等于闭着眼睛发请求** ——
+ * 撞上限流才发现，而那时已经白白浪费了一批重试。
+ */
+export interface RateLimit {
+  /** 剩余的请求数。 */
+  remaining: number;
+  /** 这一小时的总额度。 */
+  limit: number;
+  /** 额度恢复的时刻（毫秒时间戳）。 */
+  resetAt: number;
+}
+
+/** 从响应头解析配额；老响应或代理剥掉头时返回 `null`。 */
+export function parseRateLimit(res: Response): RateLimit | null {
+  const remaining = Number(res.headers.get('x-ratelimit-remaining'));
+  const limit = Number(res.headers.get('x-ratelimit-limit'));
+  const reset = Number(res.headers.get('x-ratelimit-reset'));
+  if (!Number.isFinite(remaining) || !Number.isFinite(reset) || reset <= 0) return null;
+  return {
+    remaining,
+    limit: Number.isFinite(limit) ? limit : 0,
+    resetAt: reset * 1000,
+  };
+}
+
+/** 距额度恢复还有多久（毫秒，至少 0）。 */
+export function untilReset(rl: RateLimit, now = Date.now()): number {
+  return Math.max(0, rl.resetAt - now);
+}
+
+/** 把"还要等多久"说成人话。 */
+export function humanizeWait(ms: number): string {
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes <= 1) return '不到 1 分钟';
+  if (minutes < 60) return `约 ${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `约 ${hours} 小时` : `约 ${hours} 小时 ${rest} 分钟`;
+}
+
 export class GithubError extends Error {
   readonly kind: FailureKind;
   readonly status: number;
@@ -58,7 +101,16 @@ export function explainFailure(status: number, body: string): GithubError {
   }
   if (status === 403) {
     if (/rate limit/i.test(body)) {
-      return new GithubError('rate-limit', status, '请求过于频繁，已被限流', '等几分钟再试；日常增量同步本身只需要个位数请求。');
+      // 两种限流要分开说：配额用尽要等一小时（且重试毫无意义），次级限流几秒就好
+      if (/secondary rate limit/i.test(body)) {
+        return new GithubError('rate-limit', status, '请求太密，被暂时限制', '稍等片刻即可；应用会自动退避重试。');
+      }
+      return new GithubError(
+        'rate-limit',
+        status,
+        '本小时的请求额度已用完',
+        '额度每小时恢复一次。没下完的笔记会在下次同步时接着下，不用手动重来。',
+      );
     }
     return new GithubError('forbidden', status, '令牌权限不足', '确认令牌勾选了该仓库的 Contents 读写；组织仓库还需要管理员批准令牌。');
   }
@@ -159,6 +211,8 @@ export class GithubClient {
   private readonly apiBase: string;
   private readonly timeoutMs: number;
   private readonly backoffMs: (attempt: number) => number;
+  /** 最近一次响应里看到的配额。没读到过就是 `null`（不猜）。 */
+  private rateLimit: RateLimit | null = null;
   private readonly maxRetryDelayMs: number;
 
   constructor(opts: GithubClientOptions) {
@@ -227,6 +281,10 @@ export class GithubClient {
       clearTimeout(timer);
 
       // 304：内容没变。这不是错误 —— 调用方据此跳过整个下载。
+      // 每个响应都记一次配额：剩下的额度是**唯一能提前知道"快没了"的信号**
+      const seen = parseRateLimit(res);
+      if (seen) this.rateLimit = seen;
+
       if (res.status === 304) {
         return { data: undefined as T, status: 304, etag: res.headers.get('etag') };
       }
@@ -238,8 +296,13 @@ export class GithubClient {
       }
 
       const body = await res.text().catch(() => '');
-      // 限流与 5xx 值得重试（只对幂等请求）
-      const retriableStatus = res.status === 403 ? /rate limit/i.test(body) : res.status >= 500;
+      // 只有"次级限流"和 5xx 值得重试。
+      //
+      // **配额用尽不重试**：403 带着 `x-ratelimit-remaining: 0` 意味着这一小时到此为止，
+      // 重试只是把浪费乘以三，而且每个失败的请求还会再刷一次错误日志。次级限流相反 ——
+      // 它是"请求太密"、几秒就恢复，退避重试正是对的。
+      const quotaGone = res.status === 403 && (seen?.remaining === 0 || /API rate limit exceeded/i.test(body));
+      const retriableStatus = res.status === 403 ? /rate limit/i.test(body) && !quotaGone : res.status >= 500;
       lastError = explainFailure(res.status, body);
       if (retriable && retriableStatus && attempt < MAX_GET_RETRIES) {
         const wait = res.status === 403 ? retryAfterMs(res) : this.backoffMs(attempt);
@@ -249,6 +312,16 @@ export class GithubClient {
       throw lastError;
     }
     throw lastError ?? new GithubError('bad-response', 0, '请求失败', '未知错误');
+  }
+
+  /**
+   * 最近一次响应里看到的配额。
+   *
+   * 给"还要不要接着下"的判断用：额度快见底时主动收手，比撞上去再挨个失败好得多。
+   * 读到之前返回 `null` —— 调用方在未知时应当**照常进行**，不该因为没读到就不干活。
+   */
+  get remainingQuota(): RateLimit | null {
+    return this.rateLimit;
   }
 
   /** 分支头 commit sha。 */

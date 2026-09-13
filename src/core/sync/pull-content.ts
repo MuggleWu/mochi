@@ -22,6 +22,15 @@ export const L1_COUNT = 300;
 /** 并发数。设计文档 §289：4–8，不追求极限。 */
 export const CONCURRENCY = 6;
 
+/**
+ * 下载最多用到"额度还剩这些"为止。
+ *
+ * 一个上万篇的仓库全量下载要上万次请求，而配额是每小时几千 —— 一定下不完，必然撞墙。
+ * 与其撞上去让所有操作一起失败，不如留一点余量给交互操作（同步、推送、打开笔记时的补拉）；
+ * 剩下的下次接着下 —— 分级拉取本来就是可中断续传的。
+ */
+export const QUOTA_RESERVE = 150;
+
 export interface PlanInput {
   /** 全部笔记名，**必须已按 mtime 倒序**（列表就是这么排的）。 */
   order: string[];
@@ -97,6 +106,16 @@ export interface RunOptions {
    * 换了假网络，上一次的运行必须让位，否则会拿新网络去下旧任务）。
    */
   shouldStop?(): boolean;
+  /**
+   * 这一小时还剩多少请求额度；不知道就返回 `null`。
+   *
+   * 每下完一篇问一次。**低于保留量时主动收手** —— 下载是唯一会成百上千次发请求的操作
+   * （一篇一个请求），让别的操作（同步、推送、打开笔记时的即时补拉）还有额度可用，
+   * 比"把额度全用在后台补齐上、然后所有操作一起失败"好得多。
+   */
+  quota?(): { remaining: number; resetAt: number } | null;
+  /** 保留多少额度不用于下载。默认 `QUOTA_RESERVE`。 */
+  quotaReserve?: number;
   concurrency?: number;
 }
 
@@ -106,6 +125,13 @@ export interface RunResult {
   bytes: number;
   /** 是否因为 shouldStop() 而提前结束。 */
   stopped: boolean;
+  /**
+   * 因为额度见底而提前收手时的恢复时刻（毫秒时间戳）；不是这个原因就是 0。
+   *
+   * 和 `stopped` 分开，因为**对用户说的话完全不同**：一个是"你按了暂停"，
+   * 另一个是"这一小时的额度用完了，X 之后接着下"。混在一起就只能说一句含糊的"已暂停"。
+   */
+  quotaPausedUntil: number;
 }
 
 /**
@@ -115,6 +141,9 @@ export interface RunResult {
 export async function runDownloads(opts: RunOptions): Promise<RunResult> {
   const { paths, fetchText, remoteShaOf, accept, onProgress, shouldStop } = opts;
   const concurrency = Math.max(1, opts.concurrency ?? CONCURRENCY);
+  const reserve = opts.quotaReserve ?? QUOTA_RESERVE;
+  /** 因为额度见底停下时的恢复时刻（0 = 不是这个原因）。 */
+  let quotaPausedUntil = 0;
 
   const ok: string[] = [];
   const failed: string[] = [];
@@ -131,6 +160,13 @@ export async function runDownloads(opts: RunOptions): Promise<RunResult> {
     for (;;) {
       if (stopped) return;
       if (shouldStop?.()) {
+        stopped = true;
+        return;
+      }
+      // 这里是唯一"发请求前先看额度"的地方：下载是一篇一个请求，最容易把额度打光
+      const quota = opts.quota?.();
+      if (quota && quota.remaining <= reserve) {
+        quotaPausedUntil = quota.resetAt;
         stopped = true;
         return;
       }
@@ -170,5 +206,5 @@ export async function runDownloads(opts: RunOptions): Promise<RunResult> {
   await Promise.all(workers);
 
   report();
-  return { ok, failed, bytes, stopped };
+  return { ok, failed, bytes, stopped, quotaPausedUntil };
 }

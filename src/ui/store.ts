@@ -37,7 +37,7 @@ import { clipboardText, writeClipboardText } from '@core/clipboard';
 import { pushMessage, pushNotes, pathsToPush } from '@core/sync/push';
 import { deserializeSession, serializeSession, type SessionState } from '@core/fs/session';
 import { displayTitle } from '@core/paths';
-import { GithubClient, type FetchLike } from '@core/net/github';
+import { GithubClient, humanizeWait, type FetchLike } from '@core/net/github';
 import { fetchSnapshot, reconcileSnapshot } from '@core/sync/pull-metadata';
 import { walkHistory } from '@core/history/mtime';
 import { DEFAULT_SETTINGS, type Settings, isConfigured, loadSettings, saveSettings } from '@core/sync/settings';
@@ -1193,6 +1193,8 @@ async function doPullContent(options?: { limit?: number }): Promise<void> {
   const failed = new Set<string>();
   let totalOk = 0;
   let totalFailed = 0;
+  /** 因为额度用完而收手时的恢复时刻（0 = 不是这个原因）。 */
+  let quotaPausedUntil = 0;
 
   try {
     // 循环两轮：第一轮 L1（最近 300 篇，先让"打开就能读"），第二轮 L2（后台补齐其余）。
@@ -1235,11 +1237,14 @@ async function doPullContent(options?: { limit?: number }): Promise<void> {
           set({ pullDone: p.done });
         },
         shouldStop: () => pullStopRequested || stale(),
+        // 额度见底就收手：留一点给同步/推送/打开笔记时的补拉，剩下的下次接着下
+        quota: () => client.remainingQuota,
       });
 
       for (const path of result.failed) failed.add(path);
       totalOk += result.ok.length;
       totalFailed += result.failed.length;
+      if (result.quotaPausedUntil) quotaPausedUntil = result.quotaPausedUntil;
       // 每轮结束落一次盘即可：逐篇写会伤闪存，且真中断了也只是重下
       await persistManifest(get().meta);
       if (result.stopped) break;
@@ -1250,14 +1255,20 @@ async function doPullContent(options?: { limit?: number }): Promise<void> {
     await flushIndex();
     const pending = pendingContentCount(get().meta);
     const stopped = pullStopRequested;
+    // 三种收尾要分开说：用户按了暂停、额度用完、正常下完。
+    // 混成一句含糊的"已暂停"，用户就不知道"是我停的？还是坏了？还要不要管它？"
+    const quotaWait = quotaPausedUntil ? humanizeWait(Math.max(0, quotaPausedUntil - Date.now())) : '';
+    const note = quotaPausedUntil
+      ? `本小时额度用完：本次下好 ${totalOk} 篇，还差 ${pending} 篇，${quotaWait}后接着下`
+      : stopped
+        ? `已暂停：本次下好 ${totalOk} 篇，还差 ${pending} 篇`
+        : `内容已就绪：本次下好 ${totalOk} 篇${totalFailed ? `，${totalFailed} 篇失败` : ''}，还差 ${pending} 篇`;
     set({
       pullStage: '',
       pendingContent: pending,
-      pullPaused: stopped && pending > 0,
-      lastSyncNote: stopped
-        ? `已暂停：本次下好 ${totalOk} 篇，还差 ${pending} 篇`
-        : `内容已就绪：本次下好 ${totalOk} 篇${totalFailed ? `，${totalFailed} 篇失败` : ''}，还差 ${pending} 篇`,
-      ...(totalOk > 0 && !stopped ? { toast: `已下载 ${totalOk} 篇笔记内容` } : {}),
+      pullPaused: (stopped || Boolean(quotaPausedUntil)) && pending > 0,
+      lastSyncNote: note,
+      ...(totalOk > 0 && !stopped && !quotaPausedUntil ? { toast: `已下载 ${totalOk} 篇笔记内容` } : {}),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

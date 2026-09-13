@@ -179,6 +179,68 @@ describe('runDownloads', () => {
 
   it('空任务列表直接返回，不建 worker', async () => {
     const res = await runDownloads(makeOpts([]));
-    expect(res).toEqual({ ok: [], failed: [], bytes: 0, stopped: false });
+    expect(res).toEqual({ ok: [], failed: [], bytes: 0, stopped: false, quotaPausedUntil: 0 });
+  });
+
+  describe('额度守卫：快没额度时主动收手', () => {
+    it('额度低于保留量就停下，并报告恢复时刻', async () => {
+      const resetAt = Date.now() + 1800_000;
+      let fetched = 0;
+      const res = await runDownloads(
+        makeOpts(['a.md', 'b.md', 'c.md', 'd.md'], {
+          fetchText: async () => {
+            fetched += 1;
+            return '内容';
+          },
+          // 还剩 10，低于默认保留量
+          quota: () => ({ remaining: 10, resetAt }),
+        }),
+      );
+
+      expect(res.stopped).toBe(true);
+      expect(res.quotaPausedUntil).toBe(resetAt);
+      expect(fetched).toBe(0); // 一次都没下 —— 这才是"收手"的意义
+    });
+
+    it('额度充足时照常下完', async () => {
+      const res = await runDownloads(
+        makeOpts(['a.md', 'b.md'], {
+          quota: () => ({ remaining: 4000, resetAt: Date.now() + 600_000 }),
+        }),
+      );
+      expect(res.stopped).toBe(false);
+      expect(res.quotaPausedUntil).toBe(0);
+      expect(res.ok.length).toBe(2);
+    });
+
+    it('读不到额度时照常进行（未知不等于没额度）', async () => {
+      const res = await runDownloads(makeOpts(['a.md'], { quota: () => null }));
+      expect(res.ok.length).toBe(1);
+      expect(res.stopped).toBe(false);
+    });
+
+    it('一路下到额度见底：已下好的保留，剩下的不再发请求', async () => {
+      // 用很小的保留量，好让"下着下着就见底"真的发生
+      let remaining = 4;
+      const resetAt = Date.now() + 60_000;
+      const res = await runDownloads(
+        makeOpts(['a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'f.md', 'g.md', 'h.md'], {
+          concurrency: 1,
+          quotaReserve: 2,
+          fetchText: async () => {
+            remaining -= 1;
+            return '内容';
+          },
+          quota: () => ({ remaining, resetAt }),
+        }),
+      );
+
+      // 起始 4、保留 2 → 只能下 2 篇，剩下的收手
+      expect(res.ok.length).toBe(2);
+      expect(res.stopped).toBe(true);
+      expect(res.quotaPausedUntil).toBe(resetAt);
+      // 已下好的必须还在（可中断续传的前提）
+      expect(res.ok.length).toBeGreaterThan(0);
+    });
   });
 });

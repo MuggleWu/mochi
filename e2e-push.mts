@@ -7,7 +7,8 @@
  * 用法：MOCHI_PAT=... npx tsx e2e-push.mts
  * 流程照着真实用法：新建 → 写 → 推 → 同步 → 再改 → 再推 → 删 → 再推。
  */
-import { MemoryFileStore } from './src/core/fs/memory-fs';
+import { rm } from 'node:fs/promises';
+import { NodeFileStore } from './src/core/fs/node-fs';
 import { GithubClient } from './src/core/net/github';
 import { useNotes } from './src/ui/store';
 
@@ -39,12 +40,21 @@ const count = async (): Promise<number> => (await rootTree()).filter((e) => e.pa
 const baseline = await count();
 console.log(`  分支 ${branch} 初始 ${baseline} 篇`);
 
-// 预置一个空文件再"打开"它：清单里先有这篇，拉取时就不会把它当成远端新笔记
-const fs = new MemoryFileStore({ [`notes/${NAME}`]: '' });
+// 本地状态用**磁盘**并且**跨次复用**。
+//
+// 用内存层的话每次都是全新本地状态，应用就会把最近一批笔记重新下载一遍 ——
+// 一次几百个请求，纯属浪费配额，而且不像真实场景（真实使用里第二次同步只补差量）。
+const STATE = process.env.MOCHI_E2E_STATE ?? '/tmp/mochi-e2e-state';
+if (process.env.MOCHI_E2E_FRESH === '1') await rm(STATE, { recursive: true, force: true });
+const fs = new NodeFileStore(STATE);
+// 第一次跑（或状态被清过）时先放一个空文件：建清单时它就已经是"本地已有"，
+// 之后拉取就不会把它当成远端新笔记、也不会去下载它。
+if (!(await fs.exists(`notes/${NAME}`))) await fs.writeText(`notes/${NAME}`, '');
 await useNotes.getState().init(fs);
-await useNotes.getState().openNote(NAME);
 await useNotes.getState().saveConfig({ repo, branch, token });
+await useNotes.getState().openNote(NAME);
 await useNotes.getState().pullMetadata();
+console.log(`  本地清单 ${Object.keys(useNotes.getState().meta.notes).length} 篇（复用状态目录 ${STATE}）`);
 check(useNotes.getState().meta.lastCommit !== '', '基准提交已建立');
 
 // ── 1. 写内容并推送 ────────────────────────────
