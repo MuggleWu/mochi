@@ -13,9 +13,12 @@ import { GithubClient } from './src/core/net/github';
 import { useNotes } from './src/ui/store';
 
 const token = process.env.MOCHI_PAT;
-if (!token) throw new Error('需要 MOCHI_PAT');
-const repo = process.env.MOCHI_E2E_REPO ?? 'owner/name';
-const branch = process.env.MOCHI_E2E_BRANCH ?? 'mochi-selftest';
+if (!token) throw new Error('需要 MOCHI_PAT（环境变量，别写进文件）');
+// 仓库与分支**必须显式给**，不设默认值。写死一个具体仓库名，等于把"某个账号下
+// 有这么个库"写进了代码里 —— 那是使用者自己的事，不该由项目替他决定。
+const repo = process.env.MOCHI_E2E_REPO;
+const branch = process.env.MOCHI_E2E_BRANCH;
+if (!repo || !branch) throw new Error('需要 MOCHI_E2E_REPO 与 MOCHI_E2E_BRANCH（用你自己的临时分支）');
 if (branch === 'master' || branch === 'main') throw new Error('拒绝在主分支上跑端到端');
 const NAME = 'zz-推送自测-可删.md';
 
