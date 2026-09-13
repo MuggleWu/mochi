@@ -134,6 +134,35 @@ const readMeta = async (fs: MemoryFileStore) => deserializeMeta((await fs.readTe
 const strip = (u: string): string => u.replace('https://api.github.com/repos/owner/repo', '');
 
 describe('反推真实修改时间', () => {
+  it('**点一次同步，返回时时间就已经就位**（不能靠后台自己慢慢补）', async () => {
+    /*
+     * 这条守的是一个曾经真实发生过的顺序问题：同步时内容下载与历史整理**同时起飞**，
+     * 而额度只有一份。正文下载（首启 300 篇 = 300 个请求）把它吃光，历史整理
+     * （150 个请求）几乎必然饿死 —— 表现是整个列表全是"时间未知"，顺序完全是乱的。
+     *
+     * 所以判据不是"最终能不能拿到时间"（那种测试即使顺序反了也会通过，因为后台
+     * 终究会跑完），而是 **`syncNow()` 返回时时间有没有就位** —— 这才是用户看到的东西。
+     */
+    const fake = historyFake();
+    __setFetchForTest(fake.fetch);
+    const fs = new MemoryFileStore();
+    await useNotes.getState().init(fs);
+    await useNotes.getState().saveConfig({ repo: 'owner/repo', branch: 'master', token: 'ok' });
+    await useNotes.getState().syncNow();
+
+    // 刻意**不** await 任何后台任务：就是要看这一刻的状态
+    const s = useNotes.getState();
+    expect(s.histNote).not.toBe(''); // 整理这一步真的跑完了
+    const filled = Object.values(s.meta.notes).filter((e) => hasRealMtime(e)).length;
+    expect(filled).toBeGreaterThan(0);
+    // 落盘的那份也必须一致，否则重开应用又是"未知"
+    const meta = await readMeta(fs);
+    expect(Object.values(meta.notes).filter((e) => hasRealMtime(e)).length).toBe(filled);
+
+    await __awaitMtimeRefreshForTest();
+    await __awaitContentPullForTest();
+  });
+
   it('只问该问的端点（提交列表 + 逐个提交详情），不碰区间比较', async () => {
     const fake = historyFake();
     await configureAndSync(fake);

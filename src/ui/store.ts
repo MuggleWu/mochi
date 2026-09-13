@@ -48,6 +48,7 @@ import { loadIndex, saveIndex, indexNotes, indexOne, type IndexNote } from '@cor
 import { updateNote } from '@core/search/index';
 import { auditIndexAgainstText } from '@core/search/audit';
 import { mergeRows, snippetFor, type SearchRow } from './search-view';
+import { textHasQuery } from '@core/search/verify';
 
 export type Mode = 'read' | 'edit';
 
@@ -146,7 +147,13 @@ export interface NotesState {
   init(store: FileStore): Promise<void>;
   saveConfig(next: Settings): Promise<void>;
   /** 拉取远端元数据（阶段一）：一个请求拿到全部笔记，不下载内容。 */
-  pullMetadata(): Promise<void>;
+  /**
+   * 让清单与远端一致。
+   *
+   * `deferContent` 为真时不自动开始下载正文 —— 留给调用方在合适时机再放它跑
+   * （同步入口要先把版本历史整理完，见 `syncNow`）。
+   */
+  pullMetadata(opts?: { deferContent?: boolean }): Promise<void>;
   /** 拉取内容：先 L1（最近 300 篇），再 L2（后台补齐）。自动开跑，可暂停。 */
   pullContent(options?: { limit?: number }): Promise<void>;
   refreshMtimes(opts?: { maxCommits?: number }): Promise<void>;
@@ -312,13 +319,14 @@ let pullGeneration = 0;
 let histRun: Promise<void> | null = null;
 
 /** 起一次历史整理并记下句柄；已经在跑就不重复起。 */
-function startRefreshMtimes(opts?: { maxCommits?: number }): void {
-  if (histRun) return;
+function startRefreshMtimes(opts?: { maxCommits?: number }): Promise<void> {
+  if (histRun) return histRun; // 已经在整理，复用同一份，不叠第二次
   const run = useNotes.getState().refreshMtimes(opts);
   histRun = run;
   void run.finally(() => {
     if (histRun === run) histRun = null;
   });
+  return run;
 }
 
 /**
@@ -538,7 +546,7 @@ export const useNotes = create<NotesState>((set, get) => ({
     if (repoChanged) set({ lastSyncNote: '仓库已更改，下次同步会重新建立清单' });
   },
 
-  async pullMetadata() {
+  async pullMetadata(opts?: { deferContent?: boolean }) {
     const { settings, meta } = get();
     if (!isConfigured(settings)) {
       set({ error: '还没有配置同步仓库：请在设置里填写「仓库」与「访问令牌」' });
@@ -582,7 +590,10 @@ export const useNotes = create<NotesState>((set, get) => ({
       await persistManifest(next);
       // 清单就位后**不 await**：列表此刻已经可用，内容下载是后台的事。
       // 让它接着跑，用户马上就能打开最近的笔记（D4 的"能立刻用"）。
-      if (pending > 0) void get().pullContent();
+      //
+      // `deferContent`：从同步入口进来时先别放它跑。原因见 `syncNow` —— 它一起飞就会
+      // 把额度吃光，把版本历史整理饿死，结果是"整屏时间未知"。
+      if (pending > 0 && !opts?.deferContent) void get().pullContent();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const hint = (err as { hint?: string }).hint;
@@ -598,9 +609,22 @@ export const useNotes = create<NotesState>((set, get) => ({
    * 谁想知道"元数据阶段发了哪些请求"都能干净地只看 `pullMetadata`。
    */
   async syncNow() {
-    await get().pullMetadata();
-    // 清单已经可用，内容与时间都在后台补齐（都不 await）
-    if (!get().error) startRefreshMtimes();
+    await get().pullMetadata({ deferContent: true });
+    if (get().error) return;
+
+    /*
+     * **顺序是刻意的：先整理时间，再下载正文。**
+     *
+     * 两件事都要发请求，而额度是一份。从前它们是同时起飞的，结果正文下载
+     * （首启 300 篇 = 300 个请求）把额度吃光，历史整理（150 个请求）几乎必然饿死 ——
+     * 表现就是整个列表全是"时间未知"，也就是"列表顺序完全是乱的"。
+     *
+     * 时间整理的请求量是**有上限且很小**的（每次最多走 `HISTORY_WINDOW` 个提交），
+     * 而且它决定的正是用户最先看到的东西：列表顺序。所以让它先跑完这一段，
+     * 再把大头的正文下载放出去 —— 两者都不阻塞界面。
+     */
+    await startRefreshMtimes();
+    if (get().pendingContent > 0) void get().pullContent();
   },
 
   /**
@@ -615,7 +639,7 @@ export const useNotes = create<NotesState>((set, get) => ({
     if (get().histTotal > 0) return; // 已经在整理，不要叠第二份
 
     // 注意：这里**必须重新读一次** `meta`，不能复用进入时抓的快照。
-    // `syncNow` 是"先同步清单、再起整理"，而 `startRefreshMtimes` 不 await；
+    // 整理可能在清单同步之前就被触发（例如切后台回来的那条路径）；
     // 若拿着同步前的空清单当 `keepOnly`，历史里所有路径都会被过滤掉，
     // 结果是"跑了一整轮、一个时间都没落上"（实测踩过：界面说"没有新变化"）。
     const meta = get().meta;
@@ -1168,21 +1192,39 @@ export const useNotes = create<NotesState>((set, get) => ({
     // 读命中笔记的正文来生成摘要。只读命中的那些（最多 SEARCH_LIMIT 篇），
     // 不做全库扫描 —— 这正是"搜索零读盘"的边界：排序零读盘，展示摘要要读命中的几篇。
     const snippets = new Map<string, { snippet: string; hl?: [number, number] }>();
+    /*
+     * 顺手核对："命中的词真的在这篇正文里吗"。
+     *
+     * 搜索只查倒排表、从不回头看正文，而倒排表是增量维护的；万一某一步漏摘，就会
+     * 搜出一篇根本没有这个词的笔记，**而且看起来完全像真的**（有标题、有摘要、命中处
+     * 还画着下划线）—— 用户会以为自己记错了，比"搜不到"糟得多。
+     *
+     * 这一段本来就要读正文做摘要，所以核对不额外读盘。对不上就**不列这条**：
+     * 一个指向不存在内容的命中，比少一条结果更坏。同时记下次数，便于事后追查。
+     */
+    const dropped: string[] = [];
     if (repo) {
       const want = new Set(content.slice(0, SEARCH_LIMIT));
       await Promise.all(
         [...want].map(async (path) => {
           const text = await repo!.readTextIfPresent(path);
-          if (text !== null) snippets.set(path, snippetFor(text, q.split(/\s+/)[0] ?? q));
+          if (text === null) return;
+          if (!textHasQuery(text, q)) {
+            dropped.push(path);
+            return;
+          }
+          snippets.set(path, snippetFor(text, q.split(/\s+/)[0] ?? q));
         }),
       );
     }
     if (generation !== searchGeneration) return; // 用户又敲了字，这批结果已经过期
 
+    // 核对没过的从结果里剔除（文件名命中不受影响：那是"找那篇叫 X 的笔记"，另当别论）
+    const verified = dropped.length > 0 ? content.filter((p) => !dropped.includes(p)) : content;
     set({
       rows: mergeRows(
         nameHits,
-        content,
+        verified,
         (path) => snippets.get(path) ?? { snippet: '' },
         SEARCH_LIMIT,
       ),
@@ -1434,4 +1476,14 @@ export function __abortContentPullForTest(): void {
 export function __setFileStoreForTest(fs: FileStore): void {
   store = fs;
   repo = new NotesRepo(fs);
+}
+
+/**
+ * 直接塞一份搜索索引（测试用）。
+ *
+ * 为什么需要：要复现"索引与正文不一致"这种状态，只能绕过正常的更新路径去构造它 ——
+ * 正常路径恰恰是**会**保持一致的。没有这个口子，这类 bug 就永远测不到。
+ */
+export function __setSearchIndexForTest(index: SearchIndex | null): void {
+  searchIndex = index;
 }
