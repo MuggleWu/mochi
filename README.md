@@ -4,6 +4,46 @@ Lightweight Android client for reading, editing, and syncing a Git-hosted Markdo
 
 一个面向 Android 的轻量 Markdown 笔记客户端：**只读优先 + 轻量编辑**，与存放在 GitHub（私有或公开）仓库里的笔记目录双向增量同步。
 
+## Project status / 项目状态
+
+**This is a practice project. It is not being developed or tested further.**
+
+It was built to learn a specific set of things end to end: Capacitor on Android, the GitHub
+Git Data API, incremental two-way sync, a tiered download strategy, and a search index that
+stays correct while the files underneath it change. Those goals were met, and the code is
+kept as a reference. What it is *not* is a product with users to support.
+
+**Honest reason for stopping.** Most of the time I have a computer within reach. The moments
+I do not are commutes or time already spoken for by something else — and if I am away from a
+desk and genuinely free, I would rather review flashcards on my phone than edit notes on it.
+That leaves almost no occasion that actually calls for a note app on a phone: not writing,
+and not even reading much. Operating notes on a phone is far less convenient than on a
+computer anyway. So the premise did not survive contact with how I actually work, and I
+stopped.
+
+If you found this repo looking for a maintained Android client for a Git-backed Markdown
+vault, this is not it. The design document and the code are still here in case the approach
+or a specific piece is useful to you.
+
+---
+
+**这是一个练手项目，不再继续开发和测试。**
+
+它当初是为了把一组东西从头到尾做通：Android 上的 Capacitor、GitHub Git Data API、
+双向增量同步、分级下载策略，以及一个在底层文件不断变化时仍然正确的搜索索引。这些目标
+达到了，代码留作参考。但它**不是**一个有用户要支持的产品。
+
+**放弃的真实原因。** 我大部分时间手边都有电脑。没有电脑的时候，一般是在通勤，或者
+有别的事情占着 —— 而如果我在远离桌子的地方又确实空闲，我更愿意用手机刷卡（复习卡片），
+而不是在手机上编辑笔记。于是真正需要"手机上的笔记 App"的场景少之又少：别说写笔记，
+连看笔记都很少。何况在手机上操作笔记本来就远不如电脑方便。所以这个前提没有经受住
+我实际工作方式的检验，我就停下了。
+
+如果你是来找一个**在维护的**、面向 Git 仓库 Markdown 笔记的 Android 客户端，那它不是。
+设计文档和代码都还在，如果其中的思路或某个具体做法对你有用，尽管拿走。
+
+---
+
 ## 它做什么
 
 - 阅读：渲染标题/列表/表格/引用/代码块/公式，`[[内部链接]]` 跳转，外链确认后打开
@@ -20,7 +60,7 @@ Lightweight Android client for reading, editing, and syncing a Git-hosted Markdo
 
 只处理仓库根目录的 `.md`，子目录与附件原样不动。
 
-**已知限制**：同一篇笔记在手机和别处都改过时，它会保守地判定成冲突、**停下不推**，而不是猜一个赢家。应用里目前没有"保留哪一边"的选择界面 —— 这类笔记需要先在别处把两边的内容合并好，再回到应用同步一次。宁可停下让人来处理，也不要静默覆盖掉一边的改动。
+**已知限制**：同一篇笔记在手机和别处都改过时，它会保守地判定成冲突、**停下不推**，而不是猜一个赢家。应用里目前**没有**"保留哪一边"的选择界面，这是有意的：手机上两个版本都是你自己写的，哪边更重要只有你知道，而整篇覆盖型的二选一在小屏幕上很难看清后果。这类笔记要**先回电脑上把内容理顺并同步**，再回到应用同步一次 —— 那几篇会被电脑上的版本覆盖。宁可停下让人来处理，也不要静默覆盖掉一边的改动。
 
 ## 技术要点
 
@@ -29,11 +69,13 @@ Lightweight Android client for reading, editing, and syncing a Git-hosted Markdo
 - 同步走 GitHub REST（Git Data API）：拉取两阶段（先元数据后内容），推送用内联 `content` 的最小化提交
 - 一次推送最少 3 个请求（建树 → 建提交 → 更新分支），**绝不 force**：远端在我们读取之后被推过时如实报错让人先拉取
 - 推送完会读回刚建立的提交，确认它的父提交正是推送前记下的那个、树正是刚建的那个；对不上就报失败并保留改动，宁可下次重复推一遍
-- 拉取带 ETag 条件请求，树没变时 0 字节返回；真实修改时间从版本历史反推，每次同步只核对一段，中断也不丢进度
+- 拉取带 ETag 条件请求，树没变时 0 字节返回；真实修改时间从版本历史反推，**一次同步连着核对多段**（每段完就落盘并重排，中断也不丢进度）
 - 列表、搜索、同步**不读文件**：内存清单 + 常驻 2-gram 倒排索引（差分 varint 压缩）
 - 编辑状态用原生 `<textarea>` + 行号槽；跳转定位用同排版的隐藏镜像测量（软换行下 `scrollTop ÷ 行高` 不成立）
 
 ## 开发
+
+项目已停更，但下面这套流程仍然可用 —— 想拿它当参考实现、或自己改着玩都没问题。
 
 ```bash
 npm install
@@ -75,7 +117,11 @@ cd android && ./gradlew assembleDebug   # 需先设好 ANDROID_HOME
 出包后把 APK 归档到与仓库同级的 **`../mochi-产物/`**（本仓库的上一级目录，每次构建都要放）：
 
 - `mochi-latest.apk` —— 最新一版，装机用这个
-- `mochi-<版本>-debug-<日期>.apk` —— 按日期留档，便于回退到旧版本
+- `mochi-<版本>-debug-<日期>.apk` —— 同一份文件的带版本号副本，便于确认版本
+
+**这个目录只保留最新一版**（项目已停更，见开头「项目状态」）：开发过程中一度堆了十几个
+历史包、共 90 MB 左右，而实际没有任何一次回退用上过 —— 需要旧版本时照上面的流程重新
+构建即可，代码才是权威。
 
 ```sh
 npm run build && npx cap sync android && (cd android && ./gradlew assembleDebug)
