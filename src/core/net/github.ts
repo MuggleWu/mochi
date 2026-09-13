@@ -235,13 +235,63 @@ export class GithubClient {
   }
 
   /** 分支头 commit sha。 */
+  /**
+   * 分支头 commit sha。
+   *
+   * 这个请求的 404 有两种成因，而两者的修法完全不同 —— "分支名写错"要去改分支，
+   * "令牌没勾这个仓库"要去改令牌。原始提示只能把两种可能并列出来，用户得自己猜。
+   * 这里多做一步判定，把它收敛成确定的结论。
+   *
+   * 判定靠**两个 404 的差异**：仓库层面读得到 → 仓库名和令牌都没问题，那分支就是错的；
+   * 仓库层面也 404 → 才回到"两种可能"。
+   *
+   * 代价只落在失败路径上：成功时下面的代码根本不执行，只多两个很小的请求
+   * （仓库信息 + 分支列表）。**不要**为了省这点代价去掉判定 —— 猜错方向让用户
+   * 去重发令牌，比多两个请求糟得多。
+   */
   async getRefHead(): Promise<string> {
-    const data = await this.request<{ object?: { sha?: string } }>(
-      `/repos/${this.repo}/git/ref/heads/${encodeURIComponent(this.branch)}`,
-    );
+    let data: { object?: { sha?: string } };
+    try {
+      data = await this.request<{ object?: { sha?: string } }>(
+        `/repos/${this.repo}/git/ref/heads/${encodeURIComponent(this.branch)}`,
+      );
+    } catch (err) {
+      if (!(err instanceof GithubError) || err.status !== 404) throw err;
+      throw await this.explainRefNotFound(err);
+    }
     const sha = data.object?.sha;
     if (!sha) throw new GithubError('bad-response', 200, '分支信息里没有 sha', '确认分支名是否正确。');
     return sha;
+  }
+
+  /** 把 getRefHead 的 404 收敛成确定的结论（见那个方法的注释）。 */
+  private async explainRefNotFound(original: GithubError): Promise<GithubError> {
+    let repoReadable = false;
+    let branches: string[] = [];
+    try {
+      await this.request<{ default_branch?: string }>(`/repos/${this.repo}`);
+      repoReadable = true;
+    } catch {
+      // 读不到 = 仓库名不对或令牌没授权，保持原来那句并列提示
+    }
+    if (repoReadable) {
+      try {
+        const refs = await this.request<{ ref?: string }[]>(`/repos/${this.repo}/git/refs/heads`);
+        branches = refs.map((r) => (r.ref ?? '').replace(/^refs\/heads\//, '')).filter(Boolean);
+      } catch {
+        // 拿不到分支列表不影响结论，只是少一句"实际有哪些分支"
+      }
+    }
+
+    if (!repoReadable) return original;
+
+    // main / master 写反是最常见的，所以把实际存在的分支直接列出来
+    const known = branches.slice(0, 8);
+    const hint =
+      known.length > 0
+        ? `这个仓库里没有分支「${this.branch}」，实际有：${known.join('、')}。改成其中之一即可；仓库名和令牌都是好的，不用动它们。`
+        : `这个仓库里没有分支「${this.branch}」，改一个实际存在的分支名；仓库名和令牌都是好的，不用动它们。`;
+    return new GithubError('not-found', 404, `分支「${this.branch}」不存在`, hint);
   }
 
   /** commit → 根树 sha。 */

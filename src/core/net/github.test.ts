@@ -4,9 +4,11 @@
  * 重点是失败路径：超时、限流重试、404 的歧义提示、非快进冲突、推送只发 3 个请求。
  */
 import { describe, expect, it } from 'vitest';
-import { FakeFetch } from './fake-fetch';
+import { FakeFetch, type FakeRoute } from './fake-fetch';
 import { GithubClient, GithubError, explainFailure, rootMarkdownFiles } from './github';
 import { isNoteName } from '../paths';
+
+type Route = FakeRoute;
 
 const noBackoff = () => 0;
 
@@ -97,7 +99,6 @@ describe('失败分类与提示', () => {
     expect(e.hint).toContain('仓库名');
     expect(e.hint).toContain('令牌');
   });
-
   it('409 → 非快进冲突，明确要求先拉取且不覆盖远端', () => {
     const e = explainFailure(409, '{"message":"Update is not a fast forward"}');
     expect(e.kind).toBe('conflict');
@@ -201,5 +202,90 @@ describe('推送', () => {
     const base = { token: 't', repo: 'a/b', branch: 'master', fetchImpl: new FakeFetch([]).fetch };
     expect(() => new GithubClient({ ...base, token: '' })).toThrow('缺少访问令牌');
     expect(() => new GithubClient({ ...base, repo: 'justname' })).toThrow('owner/name');
+  });
+});
+
+/**
+ * 分支名写错是最常见的配置失误（main / master 写反），而它的 404 与
+ * "令牌没勾这个仓库"的 404 **长得一模一样**。原来只能并列两种可能，
+ * 用户得自己猜方向 —— 猜错就会跑去重发令牌，白折腾一轮。
+ */
+describe('分支 404 的成因判定', () => {
+  /**
+   * 路由**顺序敏感**：`/repos/owner/repo` 是 `/repos/owner/repo/git/refs/heads`
+   * 的子串，先声明它会把分支列表的请求一起吃掉，测试就会诡异地"读不到分支列表"。
+   * 所以更具体的路由必须排在前面。
+   */
+  const branchesRoute = (names: string[]): Route => ({
+    match: '/git/refs/heads',
+    responses: [{ json: names.map((n) => ({ ref: `refs/heads/${n}` })) }],
+  });
+
+  async function refError(routes: Route[]): Promise<GithubError> {
+    const { client } = makeClient(routes);
+    try {
+      await client.getRefHead();
+      throw new Error('本应抛错，却成功了');
+    } catch (e) {
+      if (!(e instanceof GithubError)) throw e;
+      return e;
+    }
+  }
+
+  it('仓库读得到 → 断定是分支写错，并把实际存在的分支列出来', async () => {
+    const err = await refError([
+      { match: '/git/ref/heads/master', responses: [{ status: 404, text: '{"message":"Not Found"}' }] },
+      branchesRoute(['main', 'dev']),
+      { match: '/repos/owner/repo', responses: [{ json: { default_branch: 'main' } }] },
+    ]);
+
+    expect(err.kind).toBe('not-found');
+    expect(err.message).toContain('master'); // 说清是哪个分支不存在
+    expect(err.hint).toContain('main'); // 实际存在的分支要列出来
+    expect(err.hint).toContain('dev');
+    // 别让用户去动本来没问题的东西
+    expect(err.hint).toContain('不用动');
+    expect(err.hint).not.toContain('两种可能');
+  });
+
+  it('仓库也读不到 → 保持「两种可能」，不妄下结论', async () => {
+    const err = await refError([
+      { match: '/git/ref/heads/master', responses: [{ status: 404, text: '{}' }] },
+      { match: '/repos/owner/repo', responses: [{ status: 404, text: '{}' }] },
+    ]);
+
+    expect(err.kind).toBe('not-found');
+    expect(err.hint).toContain('两种可能');
+    expect(err.hint).toContain('令牌');
+  });
+
+  it('拿不到分支列表也要给出结论（少一句列举而已）', async () => {
+    const err = await refError([
+      { match: '/git/ref/heads/master', responses: [{ status: 404, text: '{}' }] },
+      { match: '/git/refs/heads', responses: [{ status: 403, text: 'forbidden' }] },
+      { match: '/repos/owner/repo', responses: [{ json: { default_branch: 'main' } }] },
+    ]);
+    expect(err.hint).toContain('分支');
+    expect(err.hint).not.toContain('两种可能');
+  });
+
+  it('成功路径不受影响：只发一次请求，不做多余的判定', async () => {
+    const { client, fake } = makeClient([
+      { match: '/git/ref/heads/master', responses: [{ json: { object: { sha: 'commit1' } } }] },
+      { match: '/repos/owner/repo', responses: [{ json: { default_branch: 'main' } }] },
+    ]);
+    await expect(client.getRefHead()).resolves.toBe('commit1');
+    // 判定只该在失败时发生；成功时多打两个请求是白花用户的流量和配额
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests[0]!.url).toContain('/git/ref/heads/master');
+  });
+
+  it('非 404 的失败原样抛出，不被误判成分支问题', async () => {
+    const err = await refError([
+      { match: '/git/ref/heads/master', responses: [{ status: 500, text: 'boom' }, { status: 500, text: 'boom' }, { status: 500, text: 'boom' }] },
+      { match: '/repos/owner/repo', responses: [{ json: { default_branch: 'main' } }] },
+    ]);
+    expect(err.status).toBe(500);
+    expect(err.hint).not.toContain('分支');
   });
 });
