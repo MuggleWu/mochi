@@ -1,5 +1,15 @@
 :root {
-  --row-h: 56px;
+  /*
+   * 抽屉每行的高度。
+   *
+   * 定这个值的依据是"标题要能完整显示、不省略"：实测标题宽度分布，手机宽度下
+   * 允许三行可覆盖 100%（最长的一个约 945px，两行装不下）。所以取 3 行标题 + 一行
+   * 时间/摘要所需的高度。
+   *
+   * **必须与 `Drawer.tsx` 的 `ROW_H` 保持一致**：虚拟滚动按固定行高算总高度与位移，
+   * 两处不一致会让滚动位置错乱。那边是唯一真源，这里只是同值。
+   */
+  --row-h: 96px;
   --bar-h: 52px;
   --bg: #ffffff;
   --bg-soft: #f6f6f7;
@@ -476,14 +486,15 @@ body {
 }
 
 .row {
-  height: var(--row-h);
+  /* 高度由 `Drawer.tsx` 用内联样式给（与虚拟滚动的行高必须是同一个数），这里不设 */
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 0 14px;
+  padding: 6px 14px;
   border-bottom: 1px solid var(--line);
   cursor: pointer;
-  gap: 2px;
+  gap: 3px;
+  box-sizing: border-box;
 }
 
 .row.active {
@@ -492,9 +503,17 @@ body {
 
 .row .name {
   font-size: 15px;
-  white-space: nowrap;
+  /*
+   * **换行显示全，不省略。** 笔记名就是用户唯一能认人的东西，`…` 一截就认不出来了；
+   * 行高是固定的，所以这里用满三行、超出才截断 —— 实测三行覆盖全部标题。
+   */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .row .meta {

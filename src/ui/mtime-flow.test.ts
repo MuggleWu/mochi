@@ -409,8 +409,14 @@ describe('排序：近期修改的必须在上面', () => {
     expect(useNotes.getState().order).toEqual(['刚改过.md', '老笔记.md']);
   });
 
-  it('一次同步只走一段窗口，剩下的留给下次（首轮就能看到效果）', async () => {
-    // 造 8 个提交，窗口设为 3
+  it('**一轮同步要把整段历史走完**，不留一半等下次（否则列表长期是乱的）', async () => {
+    /*
+     * 这条来自真机反馈"排序不太好"。原因就是一轮只走一段、剩下的要等下次同步，
+     * 而用户几小时才同步一次 —— 期间大片笔记停在"时间未知"，未知的按"下载时刻"排，
+     * 等于乱序，于是"最近改的排不到上面"。
+     *
+     * 造 8 个提交、单段窗口 3，一轮应当全部走完（段数与窗口是两回事）。
+     */
     const many = Array.from({ length: 8 }, (_, i) => ({
       sha: `c${i + 1}`,
       date: new Date(Date.UTC(2026, 0, 20) - i * 86_400_000).toISOString(),
@@ -424,7 +430,13 @@ describe('排序：近期修改的必须在上面', () => {
             json: {
               sha: 't1',
               truncated: false,
-              tree: [{ path: 'c1.md', mode: '100644', type: 'blob', sha: 's1', size: 5 }],
+              tree: many.map((c, i) => ({
+                path: `${c.sha}.md`,
+                mode: '100644',
+                type: 'blob',
+                sha: `s${i + 1}`,
+                size: 5,
+              })),
             },
           },
         ],
@@ -441,7 +453,13 @@ describe('排序：近期修改的必须在上面', () => {
           }
           const sha = (url.split('/commits/')[1] ?? '').split('?')[0] ?? '';
           if (Number(new URL(url).searchParams.get('page') ?? '1') > 1) return Response.json({ files: [] });
-          return Response.json({ sha, tree: { sha: 't1' }, parents: [], commit: { committer: { date: many.find((m) => m.sha === sha)?.date ?? '' } }, files: [{ filename: `${sha}.md` }] });
+          return Response.json({
+            sha,
+            tree: { sha: 't1' },
+            parents: [],
+            commit: { committer: { date: many.find((m) => m.sha === sha)?.date ?? '' } },
+            files: [{ filename: `${sha}.md` }],
+          });
         },
       },
     ]);
@@ -451,19 +469,62 @@ describe('排序：近期修改的必须在上面', () => {
     await useNotes.getState().saveConfig({ repo: 'owner/repo', branch: 'master', token: 'ok' });
     await useNotes.getState().pullMetadata();
 
-    // 走一次，窗口 3
     await useNotes.getState().refreshMtimes({ maxCommits: 3 });
-    const meta1 = useNotes.getState().meta;
-    expect(meta1.histFrontier).toBe('c3'); // 走到的位置
-    const dated = Object.values(meta1.notes).filter((e) => hasRealMtime(e));
-    expect(dated).toHaveLength(1); // 只算到 c1..c3 里改过的
 
-    // 再走一次，接着往旧走（不是从头重来）
-    const before = fake.requests.length;
-    await useNotes.getState().refreshMtimes({ maxCommits: 3 });
-    const meta2 = useNotes.getState().meta;
-    expect(meta2.histFrontier).toBe('c6');
-    expect(fake.requests.length).toBeGreaterThan(before);
+    const meta = useNotes.getState().meta;
+    expect(meta.histFrontier).toBe('c8'); // 一路走到最旧的那个
+    const dated = Object.values(meta.notes).filter((e) => hasRealMtime(e));
+    expect(dated).toHaveLength(8); // 8 篇全都拿到了真实时间
+    // 落盘的那份也要一致，否则重开应用又回到"未知"
+    const saved = await readMeta(fs);
+    expect(Object.values(saved.notes).filter((e) => hasRealMtime(e))).toHaveLength(8);
+  });
+
+  it('到段数上限还没走完时，如实说"还有剩"且前沿有前进（不死循环）', async () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({
+      sha: `c${i + 1}`,
+      date: new Date(Date.UTC(2026, 1, 20) - i * 86_400_000).toISOString(),
+    }));
+    const fake = new FakeFetch([
+      { match: '/git/ref/heads/master', responses: [{ json: { object: { sha: 'c1' } } }] },
+      {
+        match: '/git/trees/t1',
+        responses: [
+          { json: { sha: 't1', truncated: false, tree: [{ path: 'c1.md', mode: '100644', type: 'blob', sha: 's1', size: 5 }] } },
+        ],
+      },
+      { match: '/git/blobs/', responses: [{ text: '' }] },
+      {
+        match: /commits/,
+        responses: [{ json: [] }],
+        respond: (url: string): Response | undefined => {
+          if (url.includes('/commits?')) {
+            return Response.json(many.map((c) => ({ sha: c.sha, commit: { committer: { date: c.date } } })));
+          }
+          const sha = (url.split('/commits/')[1] ?? '').split('?')[0] ?? '';
+          if (Number(new URL(url).searchParams.get('page') ?? '1') > 1) return Response.json({ files: [] });
+          return Response.json({
+            sha,
+            tree: { sha: 't1' },
+            parents: [],
+            commit: { committer: { date: many.find((m) => m.sha === sha)?.date ?? '' } },
+            files: [{ filename: `${sha}.md` }],
+          });
+        },
+      },
+    ]);
+    __setFetchForTest(fake.fetch);
+    const fs = new MemoryFileStore();
+    await useNotes.getState().init(fs);
+    await useNotes.getState().saveConfig({ repo: 'owner/repo', branch: 'master', token: 'ok' });
+    await useNotes.getState().pullMetadata();
+
+    // 单段窗口 1、共 20 个提交：一轮走不完（段数上限 8），必须安全停下
+    await useNotes.getState().refreshMtimes({ maxCommits: 1 });
+    const meta = useNotes.getState().meta;
+    expect(meta.histFrontier).not.toBe(''); // 前沿有前进，不是原地不动
+    expect(meta.histFrontier).not.toBe('c20'); // 但没走完（上限挡住了）
+    expect(useNotes.getState().histNote).toContain('已核对'); // 如实报出核对进度
   });
 });
 

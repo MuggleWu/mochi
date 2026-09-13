@@ -31,7 +31,22 @@ const HISTORY_CONCURRENCY = CONCURRENCY;
  * 正确排序"：近期改动集中在最新的一段里，先把这一段算准，用户马上能感受到效果，
  * 历史深处则在后续每次同步里慢慢补齐（每次的成本是可控的、且随时可中断）。
  */
-const HISTORY_WINDOW = 150;
+const HISTORY_WINDOW = 300;
+
+/**
+ * 一次同步里最多连续整理几段历史。
+ *
+ * 为什么需要连续走：一次只走一段的话，**要等下一次同步才继续**，而用户可能几小时才
+ * 同步一次 —— 期间列表里大片笔记停在"时间未知"，而未知的那些是按"下载时刻"排的，
+ * 等于乱序。这就成了用户看到的"排序不太好"。
+ *
+ * 那为什么不干脆把 `HISTORY_WINDOW` 设成很大一次走完：单段太大会让**第一屏的顺序**
+ * 迟迟不出现（要从最新的往后走很多才轮到近期那批）。分段循环两头都顾上：每段结束都
+ * 落一次盘、刷一次列表，用户很快看到近期排序，之后后台继续把剩下的补齐。
+ *
+ * 上限存在的意义只是"别把一次同步拖太久"，剩下的下次同步接着走（前沿已记下）。
+ */
+const HISTORY_MAX_PASSES = 8;
 import { FLAG, hasRealMtime } from '@core/sync/manifest';
 import { clipboardText, writeClipboardText } from '@core/clipboard';
 import { pushMessage, pushNotes, pathsToPush } from '@core/sync/push';
@@ -748,50 +763,77 @@ export const useNotes = create<NotesState>((set, get) => ({
       }
 
       const current = (): Meta => get().meta;
-      // 把上次已算出的映射喂回去：整理是**可中断**的，续传时必须接着上次的结果，
-      // 否则每批新建一个空映射，落盘时会把先前算好的时间全冲掉
-      const res = await walkHistory({
-        frontier: meta.histFrontier,
-        existing: meta.fileMtimes,
-        listCommits: (page) => client.listCommits(page),
-        fetchChanges: async (sha) => ({ paths: await client.listCommitFiles(sha) }),
-        // 历史里还留着早就删掉的文件（`.trash/` 之类），只留当前清单里有的，省清单体积
-        keepOnly: new Set(Object.keys(meta.notes)),
-        concurrency: HISTORY_CONCURRENCY,
-        onProgress: (done, total) => set({ histDone: done, histTotal: total }),
-        // 每批落一次盘：中断（关应用、断网）了下次接着走，不用从头再来。
-        // 存两份：原始映射（供续传）与逐条时间（供界面直接用）。
-        onPartial: (files) => {
-          void persistManifest({ ...current(), fileMtimes: files });
-        },
-        // 单次工作量上限。默认值不是"抠门"，是**先保证近期**：
-        // 从最新往旧走，走满这一段就停，前沿记下来，下次同步接着往旧走。
-        // 这样第一次同步完，近期改过的笔记就已经排在上面了（用户要的效果），
-        // 而不是等整段历史走完才看到任何效果。
-        maxCommits: opts?.maxCommits ?? HISTORY_WINDOW,
-      });
 
-      const merged = mergeRealMtimes(current().notes, res.files);
-      const nextMeta: Meta = {
-        ...current(),
-        notes: merged.notes,
-        fileMtimes: res.files,
-        histFrontier: res.frontier,
-      };
-      set({
-        meta: nextMeta,
-        order: Object.keys(nextMeta.notes).sort(byMtimeDesc(nextMeta)),
-        histDone: 0,
-        histTotal: 0,
-        histNote:
-          merged.filled > 0
-            ? `已核对 ${res.walked} 个提交，${merged.filled} 篇笔记的真实修改时间已更新`
-            : '版本历史没有新变化',
-      });
-      await persistManifest(nextMeta);
-      if (res.more) {
-        // 还没走完（第一次装：历史长，要分几轮）—— 如实说，别让人以为坏了
-        set({ toast: '修改时间还在后台继续核对，下次同步会接着做' });
+      /*
+       * **连续走若干段，直到走完整个历史**（或到本轮的段数上限）。
+       *
+       * 为什么要有这个循环：一次只走一段的话，剩下的要等**下一次同步**才继续，而用户
+       * 可能几小时才同步一次 —— 期间列表里大片笔记停在"时间未知"。未知的那些是按
+       * "下载时刻"排的，等于乱序，于是"最近改的排不到上面"，而这正是用户最先要的东西。
+       *
+       * 为什么不把单段设得很大一次走完：那样**第一屏的排序要等很久才出现**（要从最新的
+       * 一直往后走很多才轮到近期那批）。分段循环两头兼顾：每段结束都落盘、刷列表，
+       * 很快看到近期排序，之后后台继续补齐。
+       */
+      const fileMtimes: Record<string, number> = { ...meta.fileMtimes };
+      let frontier = meta.histFrontier;
+      let walkedTotal = 0;
+      let more = false;
+      let note = '';
+
+      for (let p = 0; p < HISTORY_MAX_PASSES; p += 1) {
+        const notesNow = current().notes;
+        // 把已算出的映射喂回去：整理是**可中断**的，续传必须接着上次的结果，
+        // 否则每段新建一个空映射，落盘时会把先前算好的时间全冲掉
+        const res = await walkHistory({
+          frontier,
+          existing: fileMtimes,
+          listCommits: (page) => client.listCommits(page),
+          fetchChanges: async (sha) => ({ paths: await client.listCommitFiles(sha) }),
+          // 历史里还留着早就删掉的文件（`.trash/` 之类），只留当前清单里有的，省清单体积
+          keepOnly: new Set(Object.keys(notesNow)),
+          concurrency: HISTORY_CONCURRENCY,
+          onProgress: (done, total) => set({ histDone: done, histTotal: total }),
+          // 每批落一次盘：中断（关应用、断网）了下次接着走，不用从头再来。
+          // 存两份：原始映射（供续传）与逐条时间（供界面直接用）。
+          onPartial: (files) => {
+            void persistManifest({ ...current(), fileMtimes: files });
+          },
+          // 单段工作量上限。从最新往旧走，走满这一段先落一次盘、刷一次列表，
+          // 让近期那批马上排到位；剩下的由外层循环接着走。
+          maxCommits: opts?.maxCommits ?? HISTORY_WINDOW,
+        });
+
+        walkedTotal += res.walked;
+        Object.assign(fileMtimes, res.files);
+
+        // 落盘 + 刷列表：**每段一次**，这样用户很快看到近期排序，而不是等整段历史走完
+        const merged = mergeRealMtimes(notesNow, fileMtimes);
+        const nextMeta: Meta = {
+          ...current(),
+          notes: merged.notes,
+          fileMtimes: { ...fileMtimes },
+          histFrontier: res.frontier,
+        };
+        set({
+          meta: nextMeta,
+          order: Object.keys(nextMeta.notes).sort(byMtimeDesc(nextMeta)),
+          histNote: `已核对 ${walkedTotal} 个提交，${merged.filled} 篇笔记的真实修改时间已更新`,
+        });
+        await persistManifest(nextMeta);
+
+        note = `已核对 ${walkedTotal} 个提交，${merged.filled} 篇笔记的真实修改时间已更新`;
+        more = res.more;
+        // 前沿必须前进：不前进就说明这一段白走（本轮已经走完、或返回值有问题），
+        // 再循环下去就是原地打转。宁可停下等下次同步，也不能死循环。
+        if (!res.more || res.frontier === frontier) break;
+        frontier = res.frontier;
+      }
+
+      set({ histDone: 0, histTotal: 0, histNote: walkedTotal > 0 ? note : '版本历史没有新变化' });
+      if (more) {
+        // 还有更旧的没走完 —— 说清楚"会自己接着做"，别让人以为卡住了
+        set({ toast: '修改时间还在后台继续核对，会自己接着做' });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

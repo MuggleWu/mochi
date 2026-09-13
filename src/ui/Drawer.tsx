@@ -18,7 +18,14 @@ import { drawerProgress } from './edge-swipe';
 import type { SearchRow } from './search-view';
 
 /** 行高固定：有摘要时是"标题 + 摘要"两行，虚拟滚动不必做动态测高。 */
-const ROW_H = 60;
+/**
+ * 每行的高度。**必须与 `styles.css` 的 `--row-h` 同值**（虚拟滚动按固定行高算
+ * 总高度与位移，不一致会让滚动位置错乱）。
+ *
+ * 取这个值的依据是"标题要完整显示、不省略"：实测标题宽度分布，手机宽度下允许三行
+ * 可覆盖 100%（最长的一个约 945px，两行装不下）。所以 = 3 行标题 + 一行时间/摘要。
+ */
+const ROW_H = 96;
 
 /** 把摘要按命中区间切开，命中部分用 <mark> 标出来。 */
 function Snippet({ text, hl }: { text: string; hl?: [number, number] }): React.JSX.Element {
