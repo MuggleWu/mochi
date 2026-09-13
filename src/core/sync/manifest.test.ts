@@ -151,6 +151,34 @@ describe('清单序列化', () => {
     expect(round).toEqual(meta);
   });
 
+  it('墓碑的远端 sha 要能存盘再读回来（否则删除根本推不动）', () => {
+    // 这条是整个删除链路的地基：墓碑必须自带"远端那一版是什么"，而它**只能**靠落盘留住 ——
+    // 删除动作已经把 notes 里那条移走了，重启之后再没有别处能查到它。
+    // 丢了 sha 的症状是静默的：推送时判不出远端有没有这条，删除什么都不做，还不报错。
+    const meta: Meta = {
+      ...emptyMeta(),
+      removed: [{ path: '删掉的.md', remoteSha: 'sha-远端那一版' }],
+    };
+    expect(deserializeMeta(serializeMeta(meta)).removed).toEqual([
+      { path: '删掉的.md', remoteSha: 'sha-远端那一版' },
+    ]);
+  });
+
+  it('老清单的纯路径墓碑照旧读得进来（sha 留空，但绝不能丢记录）', () => {
+    // 老格式是字符串数组。读进来 sha 是空的，那种墓碑推不动删除，
+    // 但**丢掉它更糟** —— 它是"本地删过"的唯一证据。
+    const raw = JSON.stringify({ v: 1, removed: ['老的.md'], notes: {} });
+    expect(deserializeMeta(raw).removed).toEqual([{ path: '老的.md', remoteSha: '' }]);
+  });
+
+  it('混着老格式与新格式也能读（升级途中不会丢一半）', () => {
+    const raw = JSON.stringify({ v: 1, removed: ['老的.md', ['新的.md', 'sha-新']], notes: {} });
+    expect(deserializeMeta(raw).removed).toEqual([
+      { path: '老的.md', remoteSha: '' },
+      { path: '新的.md', remoteSha: 'sha-新' },
+    ]);
+  });
+
   it('缺字段时给出安全默认值（不抛异常）', () => {
     const m = deserializeMeta(JSON.stringify({ v: 1, notes: { 'a.md': ['L'] } }));
     expect(m.notes['a.md']).toEqual({
