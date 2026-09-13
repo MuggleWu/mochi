@@ -21,7 +21,7 @@ beforeEach(() => {
     mode: 'read',
     dirty: false,
     drawerOpen: false,
-    ui: { rename: false, sync: false, find: false, menu: false },
+    ui: { rename: false, sync: false, find: false, menu: false, selfCheck: false },
     query: '',
     error: null,
     toast: null,
@@ -53,7 +53,7 @@ describe('顶栏「更多」菜单', () => {
     expect(more).toHaveTextContent('⋮');
 
     // 必须在同步按钮**之后**（即它右边）——用文档顺序判断，不依赖具体布局数值
-    const sync = screen.getByTitle('同步设置与拉取');
+    const sync = screen.getByTitle(/同步设置与拉取/);
     expect(sync.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.click(more);

@@ -104,7 +104,7 @@ export interface NotesState {
    * 返回键的处理要按"最上面那层先关"的顺序来（见 `back-stack.ts`），而处理函数
    * 在 App 顶层，看不到子组件的局部状态。状态放这里，优先级才有一处可判。
    */
-  ui: { rename: boolean; sync: boolean; find: boolean; menu: boolean };
+  ui: { rename: boolean; sync: boolean; find: boolean; menu: boolean; selfCheck: boolean };
   error: string | null;
   toast: string | null;
   /** 同步配置（仓库/分支/令牌）。令牌只在内存与私有文件里。 */
@@ -217,7 +217,7 @@ export interface NotesState {
   setScrollRatio(r: number): void;
   dismissError(): void;
   /** 开/关某个界面层（返回键与界面按钮共用同一处状态）。 */
-  setUi(key: 'rename' | 'sync' | 'find' | 'menu', open: boolean): void;
+  setUi(key: 'rename' | 'sync' | 'find' | 'menu' | 'selfCheck', open: boolean): void;
   /**
    * 把当前笔记复制到系统剪贴板，供用户贴到别的应用里发给别人。
    *
@@ -260,6 +260,17 @@ export interface NotesState {
 }
 
 let store: FileStore | null = null;
+
+/**
+ * 拿当前的文件夹层（诊断页要读一次目录）。
+ *
+ * 为什么用取值函数而不是把 store 放进 state：它是个**生命周期对象**，不是界面数据 ——
+ * 放进 state 的话，测试里 `setState` 重置界面状态时会把它一起清掉，表现为"诊断页
+ * 在测试里读不到文件"。取值函数没有这个问题，也不会让 store 进到任何渲染依赖里。
+ */
+export function getStore(): FileStore | null {
+  return store;
+}
 let repo: NotesRepo | null = null;
 /** 网络实现可注入，便于端到端自测（默认走真实 fetch）。 */
 let fetchImpl: FetchLike | undefined;
@@ -560,7 +571,7 @@ export const useNotes = create<NotesState>((set, get) => ({
   indexed: 0,
   indexing: false,
   scrollRatio: 0,
-  ui: { rename: false, sync: false, find: false, menu: false },
+  ui: { rename: false, sync: false, find: false, menu: false, selfCheck: false },
   error: null,
   toast: null,
   settings: { ...DEFAULT_SETTINGS },

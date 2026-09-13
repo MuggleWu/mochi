@@ -23,7 +23,7 @@ beforeEach(() => {
     dirty: false,
     drawerOpen: false,
     // 弹层状态不重置的话，上一个用例开着的查找栏/弹层会带进下一个用例
-    ui: { rename: false, sync: false, find: false, menu: false },
+    ui: { rename: false, sync: false, find: false, menu: false, selfCheck: false },
     query: '',
     scrollRatio: 0,
     error: null,

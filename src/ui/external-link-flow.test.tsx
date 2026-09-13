@@ -22,7 +22,7 @@ beforeEach(() => {
     mode: 'read',
     dirty: false,
     drawerOpen: false,
-    ui: { rename: false, sync: false, find: false, menu: false },
+    ui: { rename: false, sync: false, find: false, menu: false, selfCheck: false },
     query: '',
     error: null,
     toast: null,

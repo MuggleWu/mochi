@@ -23,7 +23,7 @@ const resetState = (): void => {
     mode: 'read',
     dirty: false,
     drawerOpen: false,
-    ui: { rename: false, sync: false, find: false, menu: false },
+    ui: { rename: false, sync: false, find: false, menu: false, selfCheck: false },
     query: '',
     scrollRatio: 0,
     error: null,

@@ -13,6 +13,8 @@ import { useEdgeSwipe } from './useEdgeSwipe';
 import { prefetchMarkdown } from './md';
 import { watchKeyboardHeight } from './viewport';
 import { ExternalLinkConfirm } from './ExternalLinkConfirm';
+import { SelfCheckPage } from './SelfCheckPage';
+import { useLongPress } from './long-press';
 import { SyncSheet } from './SyncSheet';
 import { FindBar } from './FindBar';
 import { findMatches, matchLabel, replaceAllLiteral, replaceOne, stepIndex } from './find';
@@ -53,6 +55,11 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
 
   const ui = useNotes((s) => s.ui);
   const setUi = useNotes((s) => s.setUi);
+  // 长按同步按钮看诊断（隐藏入口，见 long-press.ts）
+  const syncPress = useLongPress(
+    () => setUi('selfCheck', true),
+    () => setUi('sync', true),
+  );
   const [toastVisible, setToastVisible] = useState(false);
 
   const [query, setQuery] = useState('');
@@ -276,7 +283,11 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
           {current ? displayTitle(current) : 'mochi'}
           {dirty ? ' •' : ''}
         </div>
-        <button className="pill" onClick={() => setUi('sync', true)} title="同步设置与拉取">
+        <button
+          className="pill"
+          {...syncPress}
+          title="同步设置与拉取（长按看诊断）"
+        >
           {syncStage || '同步'}
         </button>
         {current && (
@@ -329,6 +340,14 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
       {error && (
         <div className="error-bar">
           <span style={{ flex: 1 }}>{error}</span>
+          {/*
+            出错时给一个直达诊断页的入口。几处网络层的文案本来就写着"请查看诊断页"，
+            没有入口的话那句话等于指了一扇不存在的门 —— 用户只能来问，而我们连
+            "当时是什么状态"都拿不到。
+          */}
+          <button type="button" onClick={() => setUi('selfCheck', true)}>
+            诊断
+          </button>
           <button onClick={dismissError}>知道了</button>
         </div>
       )}
@@ -385,6 +404,7 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
 
       {ui.sync && <SyncSheet onClose={() => setUi('sync', false)} />}
       <ExternalLinkConfirm url={pendingLink} onClose={() => setPendingLink('')} />
+      {ui.selfCheck && <SelfCheckPage onClose={() => setUi('selfCheck', false)} />}
 
       {ui.rename && current && (
         <RenameDialog
