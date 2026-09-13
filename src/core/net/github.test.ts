@@ -29,6 +29,87 @@ function makeClient(
   return { client, fake };
 }
 
+describe('取单个提交的文件清单（反推修改时间用）', () => {
+  /** 造 n 个文件。 */
+  const files = (from: number, n: number): { filename: string }[] =>
+    Array.from({ length: n }, (_, i) => ({ filename: `第${from + i}篇.md` }));
+
+  it('不满一页就停，不多翻', async () => {
+    const { client, fake } = makeClient([
+      {
+        match: '/commits/abc',
+        responses: [{ json: { sha: 'abc', files: files(0, 7) } }],
+      },
+    ]);
+    expect(await client.listCommitFiles('abc')).toHaveLength(7);
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests[0]!.url).toContain('per_page=100&page=1');
+  });
+
+  it('满一页继续翻，直到不满一页为止', async () => {
+    // 250 个文件 = 100 + 100 + 50，三页
+    const { client, fake } = makeClient([
+      {
+        match: '/commits/abc',
+        responses: [
+          { json: { sha: 'abc', files: files(0, 100) } },
+          { json: { sha: 'abc', files: files(100, 100) } },
+          { json: { sha: 'abc', files: files(200, 50) } },
+        ],
+      },
+    ]);
+    const paths = await client.listCommitFiles('abc');
+    expect(paths).toHaveLength(250);
+    expect(paths[0]).toBe('第0篇.md');
+    expect(paths[249]).toBe('第249篇.md');
+    expect(fake.requests).toHaveLength(3);
+    expect(fake.requests[2]!.url).toContain('page=3');
+  });
+
+  it('恰好整页时再翻一次确认到底（不能少最后一页）', async () => {
+    // 100 + 0：第二页空 → 停。若写成"不满一页才停"而不翻这一次，就会漏
+    const { client, fake } = makeClient([
+      {
+        match: '/commits/abc',
+        responses: [
+          { json: { sha: 'abc', files: files(0, 100) } },
+          { json: { sha: 'abc', files: [] } },
+        ],
+      },
+    ]);
+    expect(await client.listCommitFiles('abc')).toHaveLength(100);
+    expect(fake.requests).toHaveLength(2);
+  });
+
+  it('翻页有上限（异常巨大的提交也不会无限翻）', async () => {
+    // 每一页都满 100：若不设上限就会一直翻下去
+    const { client, fake } = makeClient([
+      { match: '/commits/abc', responses: [{ json: { sha: 'abc', files: files(0, 100) } }] },
+    ]);
+    const paths = await client.listCommitFiles('abc');
+    expect(paths.length).toBeGreaterThan(0);
+    // 上限 30 页
+    expect(fake.requests.length).toBeLessThanOrEqual(30);
+  });
+
+  it('没有 files 字段时返回空数组（不报错）', async () => {
+    const { client } = makeClient([
+      { match: '/commits/abc', responses: [{ json: { sha: 'abc' } }] },
+    ]);
+    expect(await client.listCommitFiles('abc')).toEqual([]);
+  });
+
+  it('文件名缺失的条目被跳过（不塞 undefined 进来）', async () => {
+    const { client } = makeClient([
+      {
+        match: '/commits/abc',
+        responses: [{ json: { sha: 'abc', files: [{ filename: '好.md' }, {}, { filename: 1 }, { filename: '也好.md' }] } }],
+      },
+    ]);
+    expect(await client.listCommitFiles('abc')).toEqual(['好.md', '也好.md']);
+  });
+});
+
 describe('读取', () => {
   it('分支头 → commit → 根树（3 次请求链路）', async () => {
     const { client, fake } = makeClient([

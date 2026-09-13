@@ -13,6 +13,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { visibleWindow } from './virtual';
 import { useNotes } from './store';
 import { displayTitle } from '@core/paths';
+import { effectiveMtime, hasRealMtime, type NoteEntry } from '@core/sync/manifest';
 import { drawerProgress } from './edge-swipe';
 import type { SearchRow } from './search-view';
 
@@ -40,6 +41,17 @@ function formatTime(ms: number): string {
   const p = (n: number): string => String(n).padStart(2, '0');
   const day = `${sameYear ? '' : `${d.getFullYear()}-`}${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   return `${day} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * 列表里的时间。
+ *
+ * 有真实修改时间就显示它；没有（还没整理历史，或那篇从没被改过）显示「时间未知」——
+ * **不拿"下载时刻"冒充**，否则手机上会看到一堆"刚刚"，反而更没法定位。
+ */
+function entryTime(e: NoteEntry | undefined): string {
+  if (!hasRealMtime(e)) return '时间未知';
+  return formatTime(effectiveMtime(e));
 }
 
 export function Drawer(): React.JSX.Element {
@@ -159,7 +171,7 @@ export function Drawer(): React.JSX.Element {
                           <Snippet text={hit.snippet} {...(hit.hl ? { hl: hit.hl } : {})} />
                         </div>
                       ) : (
-                        <div className="meta">{formatTime(meta.notes[path]?.mtime ?? 0)}</div>
+                        <div className="meta">{entryTime(meta.notes[path])}</div>
                       )}
                     </div>
                   );

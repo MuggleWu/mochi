@@ -15,9 +15,12 @@ interface Props {
 export function SyncSheet({ onClose }: Props): React.JSX.Element {
   const settings = useNotes((s) => s.settings);
   const saveConfig = useNotes((s) => s.saveConfig);
-  const pullMetadata = useNotes((s) => s.pullMetadata);
+  const syncNow = useNotes((s) => s.syncNow);
   const syncStage = useNotes((s) => s.syncStage);
   const lastSyncNote = useNotes((s) => s.lastSyncNote);
+  const histNote = useNotes((s) => s.histNote);
+  const histDone = useNotes((s) => s.histDone);
+  const histTotal = useNotes((s) => s.histTotal);
   const ready = useNotes((s) => s.ready);
 
   const [repo, setRepo] = useState(settings.repo);
@@ -51,7 +54,7 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
     const finalRepo = normalizeRepo(repo);
     setRepo(finalRepo); // 让面板里显示的就是真正存下去的值
     await saveConfig({ repo: finalRepo, branch: branch.trim() || 'master', token: token.trim() });
-    await pullMetadata();
+    await syncNow();
     setBusy(false);
     // 成功就自动关：清单已经到手，**内容下载还在后台跑**（顶栏下面会出现进度条），
     // 面板继续开着只会用它的遮罩挡住顶栏，用户还得先点一下才能打开目录。
@@ -137,9 +140,21 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
 
         <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 12, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
           <div>{ready ? lastSyncNote : '启动中…'}</div>
+          {histTotal > 0 ? (
+            <div style={{ marginTop: 4 }}>
+              正在核对真实修改时间 {histDone} / {histTotal} 个提交…
+            </div>
+          ) : histNote ? (
+            <div style={{ marginTop: 4 }}>{histNote}</div>
+          ) : null}
           <div style={{ marginTop: 4 }}>
             保存后会先取「笔记清单」，然后自动下载最近 300 篇的内容，其余在后台补齐（可暂停）。
             打开某篇而本地没有时会就地拉那一篇。
+          </div>
+          <div style={{ marginTop: 4 }}>
+            清单到手后会顺手核对每篇的真实修改时间（从版本历史反推），这样列表顺序才和电脑上一致。
+            第一次装需要走完整段历史（几分钟），中断了下次接着做；之后每次同步只花一两个请求。
+            第一次要花几次请求，之后每次同步只多问一次分支头。
           </div>
         </div>
       </div>

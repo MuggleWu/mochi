@@ -85,6 +85,8 @@ export function reconcileSnapshot(meta: Meta, snap: RemoteSnapshot, now = Date.n
         size: f.size,
         // 树里没有修改时间，先记"同步时刻"保证顺序稳定
         mtime: now,
+        // 真实修改时间由历史整理来填（`core/history/mtime.ts`），这里不编
+        fileMtime: 0,
         flags: FLAG.METADATA_ONLY,
       };
     }

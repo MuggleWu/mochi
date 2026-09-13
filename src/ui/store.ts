@@ -15,10 +15,14 @@ import {
   type Meta,
   type NoteEntry,
 } from '@core/sync/manifest';
-import { L1_COUNT, planDownloads, runDownloads } from '@core/sync/pull-content';
-import { FLAG } from '@core/sync/manifest';
+import { CONCURRENCY, L1_COUNT, planDownloads, runDownloads } from '@core/sync/pull-content';
+// 与内容下载用同一个并发数。整理历史是"每提交一个请求"，单路要几十分钟；
+// 并发起来能把总时间压到分钟级，再高容易撞限流。
+const HISTORY_CONCURRENCY = CONCURRENCY;
+import { FLAG, effectiveMtime } from '@core/sync/manifest';
 import { GithubClient, type FetchLike } from '@core/net/github';
 import { fetchSnapshot, reconcileSnapshot } from '@core/sync/pull-metadata';
+import { walkHistory } from '@core/history/mtime';
 import { DEFAULT_SETTINGS, type Settings, isConfigured, loadSettings, saveSettings } from '@core/sync/settings';
 import { shouldSnapOpen } from './edge-swipe';
 import { DRAWER_SETTLE_MS } from './drawer-anim';
@@ -86,6 +90,16 @@ export interface NotesState {
   pullPaused: boolean;
   /** 正在单独拉取某一篇（L3 按需）。 */
   openingNote: boolean;
+  /** 整理版本历史的进度：已完成段数 / 总段数（0/0 = 没在整理）。 */
+  histDone: number;
+  histTotal: number;
+  /**
+   * 历史整理的结果说明。
+   *
+   * **必须与 `lastSyncNote` 分开**：内容下载和历史整理是两个互不等待的后台任务，
+   * 共用一个字段就会互相覆盖（先跑完的被后跑完的盖掉，界面显示的取决于谁慢）。
+   */
+  histNote: string;
 
   /** 当前搜索框里输入的内容。 */
   query: string;
@@ -102,6 +116,8 @@ export interface NotesState {
   pullMetadata(): Promise<void>;
   /** 拉取内容：先 L1（最近 300 篇），再 L2（后台补齐）。自动开跑，可暂停。 */
   pullContent(options?: { limit?: number }): Promise<void>;
+  refreshMtimes(opts?: { maxCommits?: number }): Promise<void>;
+  syncNow(): Promise<void>;
   /** 暂停内容拉取（当前批次跑完即停，已下好的保留）。 */
   pauseContent(): void;
   /** 单篇内容到位后并入清单（下载与按需拉取共用）。 */
@@ -193,8 +209,51 @@ let pullRun: Promise<void> | null = null;
  */
 let pullGeneration = 0;
 
+/** 正在跑的历史整理（后台起，测试要能等它结束）。 */
+let histRun: Promise<void> | null = null;
+
+/** 起一次历史整理并记下句柄；已经在跑就不重复起。 */
+function startRefreshMtimes(opts?: { maxCommits?: number }): void {
+  if (histRun) return;
+  const run = useNotes.getState().refreshMtimes(opts);
+  histRun = run;
+  void run.finally(() => {
+    if (histRun === run) histRun = null;
+  });
+}
+
+/**
+ * 按修改时间倒序。
+ *
+ * 用 `effectiveMtime`：有真实修改时间就用真实的，没有才退回"落盘时刻"。
+ * 整理过历史之后，手机上看到的顺序才和电脑上一致。
+ */
 const byMtimeDesc = (meta: Meta) => (a: string, b: string): number =>
-  (meta.notes[b]?.mtime ?? 0) - (meta.notes[a]?.mtime ?? 0);
+  effectiveMtime(meta.notes[b]) - effectiveMtime(meta.notes[a]);
+
+/**
+ * 把反推出来的真实修改时间并进清单。
+ *
+ * **只接受更新的**：一次遍历里"越新的段越先算"，所以同一路径多次出现时最大值就是
+ * 它最后被改动的时刻。反过来（无条件覆盖）会在增量整理时把已经正确的旧值改小。
+ */
+function mergeRealMtimes(
+  notes: Record<string, NoteEntry>,
+  files: Record<string, number>,
+): { notes: Record<string, NoteEntry>; filled: number } {
+  const out = { ...notes };
+  let filled = 0;
+  for (const [path, t] of Object.entries(files)) {
+    const e = out[path];
+    // 0 = 时间没解出来，不写（宁可标"未知"，也不要一个假时间）
+    if (!e || t <= 0) continue;
+    if (t > e.fileMtime) {
+      out[path] = { ...e, fileMtime: t };
+      filled += 1;
+    }
+  }
+  return { notes: out, filled };
+}
 
 export const useNotes = create<NotesState>((set, get) => ({
   ready: false,
@@ -226,6 +285,9 @@ export const useNotes = create<NotesState>((set, get) => ({
   pendingContent: 0,
   pullPaused: false,
   openingNote: false,
+  histDone: 0,
+  histTotal: 0,
+  histNote: '',
 
   async init(fs: FileStore) {
     store = fs;
@@ -337,6 +399,100 @@ export const useNotes = create<NotesState>((set, get) => ({
       const message = err instanceof Error ? err.message : String(err);
       const hint = (err as { hint?: string }).hint;
       set({ syncStage: '', error: hint ? `${message}\n${hint}` : message });
+    }
+  },
+
+  /**
+   * 点一次"同步"实际做的事：读清单、下内容、核对真实修改时间。
+   *
+   * **为什么把这三件放在 action 里而不是全塞进 `pullMetadata`**：`pullMetadata` 的职责是
+   * "让清单与远端一致"，历史整理是另一件事（失败也不影响清单可用）。分开之后，
+   * 谁想知道"元数据阶段发了哪些请求"都能干净地只看 `pullMetadata`。
+   */
+  async syncNow() {
+    await get().pullMetadata();
+    // 清单已经可用，内容与时间都在后台补齐（都不 await）
+    if (!get().error) startRefreshMtimes();
+  },
+
+  /**
+   * 整理"真实修改时间"（从版本历史反推）。
+   *
+   * 幂等且增量：前沿没动时只花 1 个请求（日常同步的常态）；有新提交时按段走。
+   * **失败不影响同步本身** —— 列表照旧可用，只是时间显示成"未知"。
+   */
+  async refreshMtimes(opts) {
+    const { settings } = get();
+    if (!isConfigured(settings)) return;
+    if (get().histTotal > 0) return; // 已经在整理，不要叠第二份
+
+    // 注意：这里**必须重新读一次** `meta`，不能复用进入时抓的快照。
+    // `syncNow` 是"先同步清单、再起整理"，而 `startRefreshMtimes` 不 await；
+    // 若拿着同步前的空清单当 `keepOnly`，历史里所有路径都会被过滤掉，
+    // 结果是"跑了一整轮、一个时间都没落上"（实测踩过：界面说"没有新变化"）。
+    const meta = get().meta;
+
+    try {
+      const client = new GithubClient({
+        token: settings.token,
+        repo: settings.repo,
+        branch: settings.branch,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+
+      // 前沿就是最新提交 → 没事可做。提前拦一道，连"列一次提交"都省掉（日常同步的常态）。
+      // `walkHistory` 内部也会判断，但那要先把提交列表拉下来才知道，白花 1 个请求。
+      if (meta.histFrontier) {
+        const head = await client.getRefHead();
+        if (head === meta.histFrontier) return;
+      }
+
+      const current = (): Meta => get().meta;
+      // 把上次已算出的映射喂回去：整理是**可中断**的，续传时必须接着上次的结果，
+      // 否则每批新建一个空映射，落盘时会把先前算好的时间全冲掉
+      const res = await walkHistory({
+        frontier: meta.histFrontier,
+        existing: meta.fileMtimes,
+        listCommits: (page) => client.listCommits(page),
+        fetchChanges: async (sha) => ({ paths: await client.listCommitFiles(sha) }),
+        // 历史里还留着早就删掉的文件（`.trash/` 之类），只留当前清单里有的，省清单体积
+        keepOnly: new Set(Object.keys(meta.notes)),
+        concurrency: HISTORY_CONCURRENCY,
+        onProgress: (done, total) => set({ histDone: done, histTotal: total }),
+        // 每批落一次盘：中断（关应用、断网）了下次接着走，不用从头再来。
+        // 存两份：原始映射（供续传）与逐条时间（供界面直接用）。
+        onPartial: (files) => {
+          void persistManifest({ ...current(), fileMtimes: files });
+        },
+        ...(opts?.maxCommits ? { maxCommits: opts.maxCommits } : {}),
+      });
+
+      const merged = mergeRealMtimes(current().notes, res.files);
+      const nextMeta: Meta = {
+        ...current(),
+        notes: merged.notes,
+        fileMtimes: res.files,
+        histFrontier: res.frontier,
+      };
+      set({
+        meta: nextMeta,
+        order: Object.keys(nextMeta.notes).sort(byMtimeDesc(nextMeta)),
+        histDone: 0,
+        histTotal: 0,
+        histNote:
+          merged.filled > 0
+            ? `已核对 ${res.walked} 个提交，${merged.filled} 篇笔记的真实修改时间已更新`
+            : '版本历史没有新变化',
+      });
+      await persistManifest(nextMeta);
+      if (res.more) {
+        // 还没走完（第一次装：历史长，要分几轮）—— 如实说，别让人以为坏了
+        set({ toast: '修改时间还在后台继续核对，下次同步会接着做' });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const hint = (err as { hint?: string }).hint;
+      set({ histDone: 0, histTotal: 0, histNote: hint ? `${message}；${hint}` : message });
     }
   },
 
@@ -594,7 +750,8 @@ export const useNotes = create<NotesState>((set, get) => ({
     const { meta } = get();
     const contentHits = searchIndex
       ? search(searchIndex, q, {
-          mtimeOf: (path) => meta.notes[path]?.mtime ?? 0,
+          // 搜索排序也走真实修改时间，否则「最近改的排前面」在手机上不成立
+          mtimeOf: (path) => effectiveMtime(meta.notes[path]),
           limit: SEARCH_LIMIT,
         }).map((hit) => hit.path)
       : [];
@@ -805,6 +962,15 @@ export async function __awaitContentPullForTest(): Promise<void> {
     const run = pullRun;
     await run.catch(() => {});
     if (pullRun === run) pullRun = null;
+  }
+}
+
+/** 等正在跑的历史整理结束（端到端自测用）。理由同 __awaitContentPullForTest。 */
+export async function __awaitMtimeRefreshForTest(): Promise<void> {
+  while (histRun) {
+    const run = histRun;
+    await run.catch(() => {});
+    if (histRun === run) histRun = null;
   }
 }
 

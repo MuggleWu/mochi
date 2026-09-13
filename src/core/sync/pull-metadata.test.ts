@@ -90,7 +90,7 @@ describe('reconcileSnapshot', () => {
 
   it('已有条目只更新远端 sha，不动本地记账', () => {
     const meta = emptyMeta('owner/repo');
-    meta.notes['a.md'] = { path: 'a.md', localSha: 'L', remoteSha: 'old', syncedSha: 'old', size: 50, mtime: 5, flags: 0 };
+    meta.notes['a.md'] = { path: 'a.md', localSha: 'L', remoteSha: 'old', syncedSha: 'old', size: 50, mtime: 5, fileMtime: 0, flags: 0 };
     const next = reconcileSnapshot(meta, snap([{ path: 'a.md', sha: 'new', size: 60 }]));
 
     const entry = next.notes['a.md']!;
@@ -102,7 +102,7 @@ describe('reconcileSnapshot', () => {
 
   it('远端已消失的笔记被标记 REMOTE_DELETED，内容不动', () => {
     const meta = emptyMeta('owner/repo');
-    meta.notes['删了.md'] = { path: '删了.md', localSha: 'L', remoteSha: 'r', syncedSha: 'r', size: 10, mtime: 1, flags: 0 };
+    meta.notes['删了.md'] = { path: '删了.md', localSha: 'L', remoteSha: 'r', syncedSha: 'r', size: 10, mtime: 1, fileMtime: 0, flags: 0 };
     const next = reconcileSnapshot(meta, snap([]));
 
     const entry = next.notes['删了.md']!;
@@ -113,7 +113,7 @@ describe('reconcileSnapshot', () => {
 
   it('从不存在的路径不会被误标为已删（本地新建、还没推上去）', () => {
     const meta = emptyMeta('owner/repo');
-    meta.notes['本地新建.md'] = { path: '本地新建.md', localSha: 'L', remoteSha: '', syncedSha: '', size: 10, mtime: 1, flags: FLAG.DIRTY };
+    meta.notes['本地新建.md'] = { path: '本地新建.md', localSha: 'L', remoteSha: '', syncedSha: '', size: 10, mtime: 1, fileMtime: 0, flags: FLAG.DIRTY };
     const next = reconcileSnapshot(meta, snap([]));
     expect(next.notes['本地新建.md']!.flags).toBe(FLAG.DIRTY);
   });

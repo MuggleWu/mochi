@@ -32,9 +32,37 @@ export interface NoteEntry {
   syncedSha: string;
   /** 字节数（远端给出或本地算出）。 */
   size: number;
-  /** 修改时间（毫秒）；排序只用它。 */
+  /**
+   * 修改时间（毫秒）；排序只用它。
+   *
+   * **它不是真实修改时间**，是"下载落盘那一刻"（git 树里根本没有文件修改时间字段）。
+   * 取它的目的是顺序稳定。真实修改时间在 `fileMtime`。
+   */
   mtime: number;
+  /**
+   * 真实最后修改时间（毫秒），从版本历史反推出来。
+   *
+   * 0 = 还不知道。**显示与排序一律优先用它**，为 0 时才退回 `mtime`（并如实标注）。
+   * 反推的代价与做法见 `core/history/mtime.ts`。
+   */
+  fileMtime: number;
   flags: number;
+}
+
+/**
+ * 排序与显示该用哪个时间：真实修改时间优先，没有才退回落盘时间。
+ *
+ * 放在这里而不是各调用点各写一遍：两处（抽屉排序、界面显示）如果各写各的，
+ * 迟早出现"排的是真实时间、显示的是落盘时间"这种对不上的情况。
+ */
+export function effectiveMtime(e: NoteEntry | undefined): number {
+  if (!e) return 0;
+  return e.fileMtime > 0 ? e.fileMtime : e.mtime;
+}
+
+/** 这篇笔记的时间是不是真实修改时间（界面据此决定要不要标"时间未知"）。 */
+export function hasRealMtime(e: NoteEntry | undefined): boolean {
+  return (e?.fileMtime ?? 0) > 0;
 }
 
 /**
@@ -74,6 +102,21 @@ export interface Meta {
   conflicts: string[];
   /** 上次成功同步的时间。 */
   lastSyncAt: number;
+  /**
+   * 反推出来的"路径 → 真实修改时间"。
+   *
+   * 与逐条的 `NoteEntry.fileMtime` 内容相同，**故意冗余**：整理历史时每批要把中间
+   * 结果落盘，而落盘走的是"重建一篇清单"，那会丢掉 `NoteEntry` 上刚算出来、还没并进去
+   * 的部分。留一份原始映射，中断续传时才能接着上次的结果继续（详见 `core/history/mtime.ts`）。
+   */
+  fileMtimes: Record<string, number>;
+  /**
+   * 版本历史整理到哪个提交（"真实修改时间"的前沿）。
+   *
+   * 空串 = 从没整理过。下次从它那里接着走，所以日常同步只多 1 个请求。
+   * 它不在历史里了说明历史被重写过，届时整段重来（见 `core/history/mtime.ts`）。
+   */
+  histFrontier: string;
 }
 
 export const SCHEMA_VERSION = 1;
@@ -89,6 +132,8 @@ export function emptyMeta(repo = '', branch = 'master'): Meta {
     notes: {},
     conflicts: [],
     lastSyncAt: 0,
+    fileMtimes: {},
+    histFrontier: '',
   };
 }
 
@@ -237,8 +282,10 @@ export function summarize(d: DiffResult): DiffSummary {
 export function serializeMeta(meta: Meta): string {
   const notes: Record<string, unknown[]> = {};
   for (const [path, n] of Object.entries(meta.notes)) {
-    // 数组形式比对象形式省下大量重复的键名
-    notes[path] = [n.localSha, n.remoteSha, n.syncedSha, n.size, n.mtime, n.flags];
+    // 数组形式比对象形式省下大量重复的键名。
+    // fileMtime 追加在**末尾**：老清单读回来时多余的项会被忽略、缺的按默认处理，
+    // 所以不用升 schemaVersion（版本号是硬校验，一动老清单就全读不出来了）。
+    notes[path] = [n.localSha, n.remoteSha, n.syncedSha, n.size, n.mtime, n.flags, n.fileMtime];
   }
   return JSON.stringify({
     v: meta.schemaVersion,
@@ -249,6 +296,8 @@ export function serializeMeta(meta: Meta): string {
     treeEtag: meta.treeEtag,
     conflicts: meta.conflicts,
     lastSyncAt: meta.lastSyncAt,
+    fileMtimes: meta.fileMtimes,
+    histFrontier: meta.histFrontier,
     notes,
   });
 }
@@ -273,12 +322,19 @@ export function deserializeMeta(text: string): Meta {
   meta.treeEtag = typeof o['treeEtag'] === 'string' ? o['treeEtag'] : '';
   meta.conflicts = Array.isArray(o['conflicts']) ? o['conflicts'].filter((x): x is string => typeof x === 'string') : [];
   meta.lastSyncAt = typeof o['lastSyncAt'] === 'number' ? o['lastSyncAt'] : 0;
+  meta.histFrontier = typeof o['histFrontier'] === 'string' ? o['histFrontier'] : '';
+  const fm = o['fileMtimes'];
+  if (typeof fm === 'object' && fm !== null && !Array.isArray(fm)) {
+    for (const [k, v] of Object.entries(fm as Record<string, unknown>)) {
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) meta.fileMtimes[k] = v;
+    }
+  }
 
   const notes = o['notes'];
   if (typeof notes === 'object' && notes !== null) {
     for (const [path, tuple] of Object.entries(notes as Record<string, unknown>)) {
       if (!Array.isArray(tuple)) continue;
-      const [localSha, remoteSha, syncedSha, size, mtime, flags] = tuple as unknown[];
+      const [localSha, remoteSha, syncedSha, size, mtime, flags, fileMtime] = tuple as unknown[];
       meta.notes[path] = {
         path,
         localSha: typeof localSha === 'string' ? localSha : '',
@@ -286,6 +342,8 @@ export function deserializeMeta(text: string): Meta {
         syncedSha: typeof syncedSha === 'string' ? syncedSha : '',
         size: typeof size === 'number' ? size : 0,
         mtime: typeof mtime === 'number' ? mtime : 0,
+        // 老清单没有这一项 → 默认 0（= 未知），界面会如实标注"时间未知"，不假装有时间
+        fileMtime: typeof fileMtime === 'number' ? fileMtime : 0,
         flags: typeof flags === 'number' ? flags : 0,
       };
     }

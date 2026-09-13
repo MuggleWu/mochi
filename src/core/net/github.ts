@@ -117,6 +117,8 @@ export interface CommitInfo {
   treeSha: string;
   message: string;
   date: string;
+  /** 第一个父提交；根提交为空串。 */
+  parentSha: string;
 }
 
 export interface TreeChange {
@@ -133,6 +135,21 @@ export interface PushResult {
 }
 
 export const MODE_FILE = '100644';
+
+/** 提交列表里的一条（只要反推修改时间够用的字段）。 */
+/**
+ * 取单个提交的文件清单时最多翻多少页。
+ *
+ * 每页 100 条，30 页 = 3000 个文件。正常提交远小于这个量级，留这么大余量只是防御：
+ * 万一某次提交异常巨大（例如一次性导入），也不至于无限翻页。
+ */
+const COMMIT_FILES_MAX_PAGES = 30;
+
+export interface CommitSummary {
+  sha: string;
+  /** ISO 时间串（committer date）。 */
+  date: string;
+}
 
 export class GithubClient {
   private readonly token: string;
@@ -300,6 +317,7 @@ export class GithubClient {
       sha?: string;
       message?: string;
       tree?: { sha?: string };
+      parents?: { sha?: string }[];
       commit?: { committer?: { date?: string } };
     }>(`/repos/${this.repo}/git/commits/${sha}`);
     if (!data.tree?.sha) throw new GithubError('bad-response', 200, '提交信息里没有根树', '远端返回的数据不完整，重试一次。');
@@ -308,7 +326,57 @@ export class GithubClient {
       treeSha: data.tree.sha,
       message: data.message ?? '',
       date: data.commit?.committer?.date ?? '',
+      // 合并提交有多个父提交，取第一个（反推修改时间只需要"更早的那个点"）
+      parentSha: data.parents?.[0]?.sha ?? '',
     };
+  }
+
+  /**
+   * 列提交（新→旧）。
+   *
+   * 用来反推"每篇笔记最后一次被改动是什么时候"。GitHub 的 `per_page` 上限就是 100，
+   * 传更大也不会多给，所以这里定死，避免调用方误以为能一次拿完。
+   */
+  async listCommits(page = 1, perPage = 100): Promise<CommitSummary[]> {
+    const size = Math.min(100, Math.max(1, perPage));
+    const data = await this.request<
+      { sha?: string; commit?: { committer?: { date?: string } } }[]
+    >(`/repos/${this.repo}/commits?per_page=${size}&page=${Math.max(1, page)}`);
+    if (!Array.isArray(data)) return [];
+    return data
+      .map((c) => ({ sha: c.sha ?? '', date: c.commit?.committer?.date ?? '' }))
+      .filter((c) => c.sha !== '');
+  }
+
+  /**
+   * 某个提交**改动了哪些文件**（取全，自动翻页）。
+   *
+   * 反推"每篇笔记最后一次被改动的时间"就靠它。
+   *
+   * **必须翻页**：不带分页参数时，这个接口最多只给 300 个文件，而且**不报错、不提示
+   * 被截断**（`files` 就 300 项，看着像"这个提交真的只改了 300 个"）。凡是走过批量
+   * 整理或一次性导入的仓库，都会有相当比例的提交正好卡在 300 —— 而漏掉的那部分恰恰是
+   * "一篇笔记最后被改动是什么时候"最需要的信息。翻页后能拿到完整的清单。
+   *
+   * 顺带记一笔：`compare`（区间比较）也有同一个 300 上限，且 `files_truncated`
+   * 会谎报 false，所以反推时间没有走那条路。
+   *
+   * `.files` 里也包含 `.obsidian/`、`.trash/` 这类非笔记文件，过滤交给调用方
+   * （它才知道"哪些路径是我们关心的"）。
+   */
+  async listCommitFiles(sha: string): Promise<string[]> {
+    const out: string[] = [];
+    for (let page = 1; page <= COMMIT_FILES_MAX_PAGES; page += 1) {
+      const data = await this.request<{ files?: { filename?: string }[] }>(
+        `/repos/${this.repo}/commits/${sha}?per_page=100&page=${page}`,
+      );
+      const files = data.files ?? [];
+      for (const f of files) {
+        if (typeof f.filename === 'string') out.push(f.filename);
+      }
+      if (files.length < 100) break;
+    }
+    return out;
   }
 
   /** 递归列目录（一次请求拿到全部条目）。 */

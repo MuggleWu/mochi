@@ -12,6 +12,8 @@ import {
   deserializeMeta,
   diffWithRemote,
   emptyMeta,
+  effectiveMtime,
+  hasRealMtime,
   isDirty,
   isMetadataOnly,
   serializeMeta,
@@ -19,7 +21,7 @@ import {
 } from './manifest';
 
 function note(path: string, localSha: string, remoteSha: string, syncedSha: string, extra: Partial<NoteEntry> = {}): NoteEntry {
-  return { path, localSha, remoteSha, syncedSha, size: 10, mtime: 1, flags: 0, ...extra };
+  return { path, localSha, remoteSha, syncedSha, size: 10, mtime: 1, fileMtime: 0, flags: 0, ...extra };
 }
 
 function metaWith(notes: NoteEntry[]): Meta {
@@ -151,8 +153,30 @@ describe('清单序列化', () => {
 
   it('缺字段时给出安全默认值（不抛异常）', () => {
     const m = deserializeMeta(JSON.stringify({ v: 1, notes: { 'a.md': ['L'] } }));
-    expect(m.notes['a.md']).toEqual({ path: 'a.md', localSha: 'L', remoteSha: '', syncedSha: '', size: 0, mtime: 0, flags: 0 });
+    expect(m.notes['a.md']).toEqual({
+      path: 'a.md',
+      localSha: 'L',
+      remoteSha: '',
+      syncedSha: '',
+      size: 0,
+      mtime: 0,
+      fileMtime: 0,
+      flags: 0,
+    });
     expect(m.branch).toBe('master');
+    expect(m.histFrontier).toBe('');
+  });
+
+  it('老清单（没有 fileMtime 那一项）照样读得出来，时间如实为空', () => {
+    // 关键：新版在元组末尾**追加**了一项，老清单少一项不能变成"清单损坏"，
+    // 也不能默认成某个真时间（那等于界面显示一个编出来的日期）
+    const old = JSON.stringify({ v: 1, notes: { 'a.md': ['L', 'R', 'S', 10, 1700000000000, 0] } });
+    const e = deserializeMeta(old).notes['a.md']!;
+    expect(e.mtime).toBe(1700000000000);
+    expect(e.fileMtime).toBe(0);
+    expect(hasRealMtime(e)).toBe(false);
+    // 显示/排序要退回 mtime，不能变成 0（0 会让它排到最后）
+    expect(effectiveMtime(e)).toBe(1700000000000);
   });
 
   it('版本不符与损坏内容都报明确错误', () => {

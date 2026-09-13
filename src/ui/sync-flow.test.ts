@@ -52,6 +52,9 @@ class TreeFake extends FakeFetch {
       { match: '/git/ref/heads/master', responses: [{ json: { object: { sha: 'c1' } } }] },
       { match: '/git/commits/c1', responses: [{ json: { sha: 'c1', tree: { sha: 't1' } } }] },
       { match: '/git/trees/t1', responses: [{ json: { sha: 't1', truncated: false, tree: entries } }] },
+      // 这里**故意不预设历史端点**（提交列表 / 区间比较）：本类只负责"元数据 + 内容"，
+      // 未预设会返回 599，历史整理随即失败退出 —— 它的请求就不会落进断言里。
+      // 真实的历史反推另有专门的假网络：`mtime-flow.test.ts`。
       {
         // 正则限定到 sha：写成子串 `/git/blobs/` 虽然更宽，但树路由的 match 也是子串，
         // 两者会互相抢先命中，断言就串了
@@ -81,8 +84,35 @@ const treeFake = (entries: Array<Record<string, unknown>>): TreeFake => new Tree
  * 为什么需要：清单一到手，内容下载就会在后台自动开跑（`void pullContent()`），
  * 请求总数里混着 blob 请求，断言"短路后只发 1 个请求"就没法写了。
  */
-const metaRequests = (fake: FakeFetch): Array<{ url: string }> =>
-  fake.requests.filter((r) => !r.url.includes('/git/blobs/'));
+const metaRequests = (fake: FakeFetch): Array<{ url: string; method: string }> =>
+  fake.requests.filter((r) => isMetaRequest(r.url));
+
+/**
+ * 只认**元数据阶段**的三个端点：ref、提交详情、递归树。
+ *
+ * 写成"取白名单"而不是"减掉 blob 与历史"：后台任务不止一个（内容下载、历史整理），
+ * 每加一个就要回来补一条排除规则，迟早漏；列白名单则新任务再多也不会污染断言。
+ */
+const isMetaRequest = (url: string): boolean =>
+  url.includes('/git/ref/heads/') || /\/git\/commits\/[^/]+$/.test(url) || url.includes('/git/trees/');
+
+/**
+ * 元数据阶段真正的那三个请求（ref / 提交详情 / 递归树）。
+ *
+ * 为什么要剔掉重复的 ref：历史整理也会先要一次 ref（它要拿分支头），而它是后台起的，
+ * 时机不确定 —— 有时落在元数据阶段之前，有时之后。断言只该盯着"元数据本身发了什么"，
+ * 不该被另一个后台任务的节奏左右。
+ */
+const metaPhase = (fake: FakeFetch): string[] => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const u of metaRequests(fake).map((r) => r.url.replace('https://api.github.com/repos/owner/repo', ''))) {
+    if (seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
+};
 
 /**
  * 造一条**内容与 sha 对得上**的树条目。
@@ -141,10 +171,10 @@ describe('配置后拉取元数据', () => {
     await useNotes.getState().pullMetadata();
     expect(snapshot).toBe(0);
     // 元数据阶段只有 ref + commit + tree 三个请求（内容请求是之后才有的）
-    expect(fake.requests.filter((r) => !r.url.includes('/git/blobs/')).map((r) => r.method)).toEqual([
-      'GET',
-      'GET',
-      'GET',
+    expect(metaPhase(fake)).toEqual([
+      '/git/ref/heads/master',
+      '/git/commits/c1',
+      '/git/trees/t1?recursive=1',
     ]);
 
     const s = useNotes.getState();
@@ -294,7 +324,9 @@ describe('配置后拉取元数据', () => {
         responses: [{ json: { object: { sha: 'c1' } } }, { json: { object: { sha: 'c2' } } }],
       },
       {
-        match: '/git/commits/',
+        // 精确到 sha：写成子串 `/git/commits/` 会把历史列表请求
+        // （`/repos/.../commits?per_page=…`）也吞掉，响应队列就错位了
+        match: /\/git\/commits\/[^/]+$/,
         responses: [
           { json: { sha: 'c1', tree: { sha: 't1' } } },
           { json: { sha: 'c2', tree: { sha: 't1' } } },
@@ -307,6 +339,8 @@ describe('配置后拉取元数据', () => {
           { status: 304, text: '' },
         ],
       },
+      // 历史整理会来问一次提交列表；空历史（新仓库就是这么开始的）
+      { match: '/commits?', responses: [{ json: [] }] },
     ]);
     __setFetchForTest(fake.fetch);
 
@@ -322,13 +356,12 @@ describe('配置后拉取元数据', () => {
     expect(s.error).toBeNull();
     expect(s.lastSyncNote).toContain('没有变化');
     // 第二次：ref + commit + 一次条件请求（304 后不再下载）
-    expect(fake.requests.map((r) => r.url.replace('https://api.github.com/repos/owner/repo', ''))).toEqual([
+    // 两次同步各走一遍元数据三件套（第二次是条件请求，树没变 → 304）
+    expect(metaPhase(fake)).toEqual([
       '/git/ref/heads/master',
       '/git/commits/c1',
       '/git/trees/t1?recursive=1',
-      '/git/ref/heads/master',
       '/git/commits/c2',
-      '/git/trees/t1?recursive=1',
     ]);
     const cond = fake.requests.filter((r) => r.headers['If-None-Match'] === 'W/"e1"');
     expect(cond).toHaveLength(1);

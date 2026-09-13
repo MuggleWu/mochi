@@ -91,6 +91,8 @@ export class NotesRepo {
       syncedSha: sha,
       size: new TextEncoder().encode(content).byteLength,
       mtime: nowStamp(this.seq++),
+      // 真实修改时间要等历史整理才知道，这里先留 0（界面会如实标注）
+      fileMtime: 0,
       flags: 0,
     };
   }
@@ -120,6 +122,7 @@ export class NotesRepo {
       syncedSha: '',
       size: new TextEncoder().encode(content).byteLength,
       mtime: nowStamp(this.seq++),
+      fileMtime: 0,
       flags: FLAG.DIRTY,
     };
   }
@@ -195,6 +198,8 @@ export class NotesRepo {
           syncedSha: prev?.syncedSha ?? '',
           size: e.size ?? new TextEncoder().encode(text).byteLength,
           mtime: e.mtime ?? nowStamp(this.seq++),
+          // 重建目录时保住已经反推出来的真实时间，否则每次重建都要重走一遍历史
+          fileMtime: prev?.fileMtime ?? 0,
           flags: prev ? prev.flags & ~FLAG.METADATA_ONLY : FLAG.DIRTY,
         };
         if (!prev) added.push(e.name);
