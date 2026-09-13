@@ -1,0 +1,87 @@
+/**
+ * 真仓库端到端：走应用自己的代码路径（store + GithubClient），不用 git。
+ *
+ * ⚠️ **只能在临时分支上跑**。它会真的建/改/删远端文件，而且应用一 `init` 就会往本地拉
+ * 真实内容 —— 拿真笔记库的主分支做这件事是不可接受的（踩过：真仓库里短暂出现过测试文件）。
+ *
+ * 用法：MOCHI_PAT=... npx tsx e2e-push.mts
+ * 流程照着真实用法：新建 → 写 → 推 → 同步 → 再改 → 再推 → 删 → 再推。
+ */
+import { MemoryFileStore } from './src/core/fs/memory-fs';
+import { GithubClient } from './src/core/net/github';
+import { useNotes } from './src/ui/store';
+
+const token = process.env.MOCHI_PAT;
+if (!token) throw new Error('需要 MOCHI_PAT');
+const repo = process.env.MOCHI_E2E_REPO ?? 'owner/name';
+const branch = process.env.MOCHI_E2E_BRANCH ?? 'mochi-selftest';
+if (branch === 'master' || branch === 'main') throw new Error('拒绝在主分支上跑端到端');
+const NAME = 'zz-推送自测-可删.md';
+
+let failures = 0;
+const check = (b: boolean, msg: string): void => {
+  if (!b) failures++;
+  console.log(`  ${b ? '✓' : '✗'} ${msg}`);
+};
+
+const client = new GithubClient({ token, repo, branch });
+const rootTree = async () => {
+  const head = await client.getRefHead();
+  const commit = await client.getCommit(head);
+  return (await client.listTree(commit.treeSha)).entries.filter((e) => !e.path.includes('/'));
+};
+const readRemote = async (path: string): Promise<string | null> => {
+  const hit = (await rootTree()).find((e) => e.path === path);
+  return hit ? client.readBlobText(hit.sha) : null;
+};
+const count = async (): Promise<number> => (await rootTree()).filter((e) => e.path.endsWith('.md')).length;
+
+const baseline = await count();
+console.log(`  分支 ${branch} 初始 ${baseline} 篇`);
+
+// 预置一个空文件再"打开"它：清单里先有这篇，拉取时就不会把它当成远端新笔记
+const fs = new MemoryFileStore({ [`notes/${NAME}`]: '' });
+await useNotes.getState().init(fs);
+await useNotes.getState().openNote(NAME);
+await useNotes.getState().saveConfig({ repo, branch, token });
+await useNotes.getState().pullMetadata();
+check(useNotes.getState().meta.lastCommit !== '', '基准提交已建立');
+
+// ── 1. 写内容并推送 ────────────────────────────
+useNotes.getState().setContent('第一版内容：推送自测。');
+await useNotes.getState().saveNote();
+await useNotes.getState().pushNow();
+check(useNotes.getState().error === null, `推送无错误${useNotes.getState().error ? '（' + useNotes.getState().error + '）' : ''}`);
+const r1 = await readRemote(NAME);
+check(r1 !== null, '远端出现了这篇笔记');
+check((r1 ?? '').includes('第一版内容'), `远端内容正确（${JSON.stringify((r1 ?? '').slice(0, 16))}）`);
+check((await count()) === baseline + 1, `远端篇数 ${baseline} → ${await count()}（只多了这一篇）`);
+check(useNotes.getState().pushDirty === 0, '推送后待推送计数归零');
+
+// ── 2. 收敛一次（真实用法：打开应用就拉取）──────
+await useNotes.getState().pullMetadata();
+const entry = useNotes.getState().meta.notes[NAME];
+check((entry?.syncedSha ?? '') !== '', '同步后这篇有了共同基准');
+check((entry?.syncedSha ?? 'x') === (entry?.localSha ?? 'y'), '共同基准与本地内容一致');
+
+// ── 3. 再改再推 ───────────────────────────────
+useNotes.getState().setContent('第二版内容：改过一次。');
+await useNotes.getState().saveNote();
+await useNotes.getState().pushNow();
+check(useNotes.getState().error === null, `第二次推送无错误${useNotes.getState().error ? '（' + useNotes.getState().error + '）' : ''}`);
+const r2 = (await readRemote(NAME)) ?? '';
+check(r2.includes('第二版内容'), '远端内容已更新');
+check(!r2.includes('第一版内容'), '远端不再是旧内容');
+check((await count()) === baseline + 1, `再推一次没有多出文件（${await count()}）`);
+
+// ── 4. 删除再推 ───────────────────────────────
+await useNotes.getState().deleteNote();
+check(useNotes.getState().meta.removed.includes(NAME), '删除留下了墓碑（否则删除传不出去）');
+await useNotes.getState().pushNow();
+check(useNotes.getState().error === null, `删除推送无错误${useNotes.getState().error ? '（' + useNotes.getState().error + '）' : ''}`);
+check((await readRemote(NAME)) === null, '远端这篇已经消失');
+check((await count()) === baseline, `远端篇数回到 ${baseline}（${await count()}）`);
+check(useNotes.getState().meta.removed.length === 0, '墓碑已清');
+
+console.log(`\n  ${failures === 0 ? '全部通过' : failures + ' 项失败'}`);
+process.exit(failures === 0 ? 0 : 1);
