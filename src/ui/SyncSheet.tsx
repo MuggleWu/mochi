@@ -17,6 +17,9 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
   const saveConfig = useNotes((s) => s.saveConfig);
   const syncNow = useNotes((s) => s.syncNow);
   const syncStage = useNotes((s) => s.syncStage);
+  const pushNow = useNotes((s) => s.pushNow);
+  const pushStage = useNotes((s) => s.pushStage);
+  const pushDirty = useNotes((s) => s.pushDirty);
   const lastSyncNote = useNotes((s) => s.lastSyncNote);
   const histNote = useNotes((s) => s.histNote);
   const histDone = useNotes((s) => s.histDone);
@@ -27,6 +30,14 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
   const [branch, setBranch] = useState(settings.branch || 'master');
   const [token, setToken] = useState(settings.token);
   const [busy, setBusy] = useState(false);
+  /**
+   * 推送前的二次确认。
+   *
+   * 为什么必须确认：这是应用里**唯一会把改动写回仓库**的动作，而且按设计，
+   * "远端已删、本地也没动过"的笔记会在推送时被删掉。默默执行的话，用户第一次点
+   * 就可能把别处的笔记删了还毫不知情。
+   */
+  const [confirmPush, setConfirmPush] = useState(false);
 
   // 校验只认**归一后**的值：用户粘完整 URL（笔记里存的就是那种）是完全正常的操作，
   // 不该被判成格式错误。下面这三种写法都会被归一成同一个 owner/name：
@@ -61,6 +72,13 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
     //
     // 出错时**不要关**：错误提示就在这个面板里，关了等于把用户要看的下一步操作一起关掉。
     if (!useNotes.getState().error) onClose();
+  };
+
+  const doPush = async (): Promise<void> => {
+    setConfirmPush(false);
+    setBusy(true);
+    await pushNow();
+    setBusy(false);
   };
 
   const field: React.CSSProperties = {
@@ -129,13 +147,45 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
           令牌只存在本机应用私有目录；不会写进任何代码或提交。
         </div>
 
-        <div style={{ display: 'flex', gap: 8, marginTop: 16, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 8, marginTop: 16, alignItems: 'center', flexWrap: 'wrap' }}>
           <button className="pill" onClick={onClose}>
             关闭
           </button>
           <button className="pill" disabled={!configured || repoBad || busy} onClick={() => void run()} style={{ marginLeft: 'auto' }}>
             {busy || syncStage ? syncStage || '同步中…' : '保存并拉取'}
           </button>
+        </div>
+
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+          <div style={{ fontSize: 13, color: 'var(--fg-dim)', marginBottom: 6 }}>
+            把手机上的改动推回仓库。推送会先核对远端（别处刚推过时会自动并入，不会覆盖）。
+          </div>
+          {pushDirty > 0 && !confirmPush && (
+            <div style={{ fontSize: 13, marginBottom: 6 }}>有 {pushDirty} 篇改动待推送。</div>
+          )}
+          {!confirmPush ? (
+            <button
+              className="pill"
+              disabled={!configured || repoBad || busy || Boolean(pushStage)}
+              onClick={() => setConfirmPush(true)}
+            >
+              {pushStage || '推送改动'}
+            </button>
+          ) : (
+            <div>
+              <div style={{ fontSize: 13, marginBottom: 8 }}>
+                确认推送到仓库？手机上删掉的笔记、以及远端已删而本地没动过的笔记，都会一起生效。
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="pill" onClick={() => setConfirmPush(false)}>
+                  再想想
+                </button>
+                <button className="pill" disabled={busy} onClick={() => void doPush()}>
+                  确认推送
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 12, borderTop: '1px solid var(--line)', paddingTop: 10 }}>

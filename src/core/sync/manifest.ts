@@ -100,6 +100,15 @@ export interface Meta {
   notes: Record<string, NoteEntry>;
   /** 尚未解决的冲突（必须持久化，见文件头注释）。 */
   conflicts: string[];
+  /**
+   * 本地已删、但**还没同步到远端**的路径（墓碑）。
+   *
+   * 为什么必须在清单里留个记录：删掉之后清单里就没有这条了，远端却还有 ——
+   * 下一次同步只能看到"远端有、本地没有"，而"本地没删过"和"本地删了但还没推"在
+   * 清单上看**一模一样**。少了这个记录，删除永远传不到远端，用户会以为删了、其实还在。
+   * 推送成功后才清掉它，并把 trash 里的备份一起清掉。
+   */
+  removed: string[];
   /** 上次成功同步的时间。 */
   lastSyncAt: number;
   /**
@@ -131,6 +140,7 @@ export function emptyMeta(repo = '', branch = 'master'): Meta {
     treeEtag: '',
     notes: {},
     conflicts: [],
+    removed: [],
     lastSyncAt: 0,
     fileMtimes: {},
     histFrontier: '',
@@ -183,6 +193,8 @@ export interface DiffResult {
   addedRemotely: string[];
   /** 本地有内容但远端没有、且从未同步过（首次同步时可能存在）。 */
   unpushed: string[];
+  /** 本地已删、还没同步到远端的路径（清单里的墓碑，远端也要跟着删）。 */
+  removedLocally: string[];
 }
 
 /**
@@ -192,6 +204,12 @@ export interface DiffResult {
  */
 export function diffWithRemote(meta: Meta, remote: RemoteNote[], newLocalPaths: string[] = []): DiffResult {
   const changes: Change[] = [];
+  // 墓碑：本地删过、远端还在 —— 远端也要删。远端已经没有了就顺手清掉墓碑（已经一致了）。
+  const remoteNow = new Set(remote.map((r) => r.path));
+  const removedLocally = meta.removed.filter((p) => remoteNow.has(p));
+  // 墓碑路径要从"远端新增"里排除掉 —— 否则它会**同时**被判为待删除和待拉取，
+  // 结果是把刚删掉的笔记又下载回来，用户看到的还是"删了又回来了"。
+  const tombstoned = new Set(removedLocally);
   const deletedLocally: string[] = [];
   const keepDeletedLocally: string[] = [];
   const addedRemotely: string[] = [];
@@ -199,6 +217,7 @@ export function diffWithRemote(meta: Meta, remote: RemoteNote[], newLocalPaths: 
   const seen = new Set<string>();
 
   for (const r of remote) {
+    if (tombstoned.has(r.path)) continue; // 本地删过、还没推到远端：只等推送去删，不要拉回来
     seen.add(r.path);
     const note = meta.notes[r.path];
     if (!note || !note.syncedSha) {
@@ -243,7 +262,7 @@ export function diffWithRemote(meta: Meta, remote: RemoteNote[], newLocalPaths: 
     unpushed.push(path);
   }
 
-  return { changes, deletedLocally, keepDeletedLocally, addedRemotely, unpushed };
+  return { changes, deletedLocally, keepDeletedLocally, addedRemotely, unpushed, removedLocally };
 }
 
 /** 判定结果摘要，用于界面提示。 */
@@ -272,7 +291,7 @@ export function summarize(d: DiffResult): DiffSummary {
     toPull,
     toPush,
     conflicts,
-    toDelete: d.deletedLocally.length,
+    toDelete: d.deletedLocally.length + d.removedLocally.length,
     keptLocal: d.keepDeletedLocally.length,
     unchanged,
   };
@@ -295,6 +314,7 @@ export function serializeMeta(meta: Meta): string {
     lastTree: meta.lastTree,
     treeEtag: meta.treeEtag,
     conflicts: meta.conflicts,
+    removed: meta.removed,
     lastSyncAt: meta.lastSyncAt,
     fileMtimes: meta.fileMtimes,
     histFrontier: meta.histFrontier,
@@ -321,6 +341,8 @@ export function deserializeMeta(text: string): Meta {
   meta.lastTree = typeof o['lastTree'] === 'string' ? o['lastTree'] : '';
   meta.treeEtag = typeof o['treeEtag'] === 'string' ? o['treeEtag'] : '';
   meta.conflicts = Array.isArray(o['conflicts']) ? o['conflicts'].filter((x): x is string => typeof x === 'string') : [];
+  // 老清单没有这个字段 → 当成"没有待同步的删除"（默认值，不是错误）
+  meta.removed = Array.isArray(o['removed']) ? o['removed'].filter((x): x is string => typeof x === 'string') : [];
   meta.lastSyncAt = typeof o['lastSyncAt'] === 'number' ? o['lastSyncAt'] : 0;
   meta.histFrontier = typeof o['histFrontier'] === 'string' ? o['histFrontier'] : '';
   const fm = o['fileMtimes'];
@@ -349,4 +371,33 @@ export function deserializeMeta(text: string): Meta {
     }
   }
   return meta;
+}
+
+/** 本地改动待推送的篇数（`FLAG.DIRTY`）。界面用它决定"推送"按钮要不要提醒。 */
+export function dirtyCount(meta: Meta): number {
+  let n = 0;
+  for (const e of Object.values(meta.notes)) if (e.flags & FLAG.DIRTY) n += 1;
+  return n;
+}
+
+/**
+ * 推送成功后更新清单。
+ *
+ * 只有**确认写进远端**的路径才被认账；`skipped`（推送期间又被改过的那些）保持原样，
+ * 于是它们仍是脏的、下次会带上最新内容再推一遍。删掉的条目直接移除。
+ *
+ * 注意这里**不重算 `localSha`**：它是"本地内容的 sha"，由保存/下载时算好；
+ * 推送只是确认"这个 sha 已经和远端一致了"，不该反过来改它。
+ */
+export function markPushed(meta: Meta, written: readonly string[], deleted: readonly string[]): Meta {
+  const notes = { ...meta.notes };
+  for (const path of written) {
+    const e = notes[path];
+    if (!e) continue;
+    notes[path] = { ...e, remoteSha: e.localSha, syncedSha: e.localSha, flags: e.flags & ~FLAG.DIRTY };
+  }
+  for (const path of deleted) delete notes[path];
+  // 删除确认生效，墓碑就可以撤了 —— 之后再同步也不会把"远端没有"误判成"没删过"
+  const gone = new Set(deleted);
+  return { ...meta, notes, removed: meta.removed.filter((p) => !gone.has(p)) };
 }

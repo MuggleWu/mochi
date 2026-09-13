@@ -12,8 +12,12 @@ import {
   deserializeMeta,
   serializeMeta,
   pendingContentCount,
+  dirtyCount,
+  diffWithRemote,
+  markPushed,
   type Meta,
   type NoteEntry,
+  type RemoteNote,
 } from '@core/sync/manifest';
 import { CONCURRENCY, L1_COUNT, planDownloads, runDownloads } from '@core/sync/pull-content';
 // 与内容下载用同一个并发数。整理历史是"每提交一个请求"，单路要几十分钟；
@@ -30,6 +34,7 @@ const HISTORY_CONCURRENCY = CONCURRENCY;
 const HISTORY_WINDOW = 150;
 import { FLAG, hasRealMtime } from '@core/sync/manifest';
 import { clipboardText, writeClipboardText } from '@core/clipboard';
+import { pushMessage, pushNotes, pathsToPush } from '@core/sync/push';
 import { deserializeSession, serializeSession, type SessionState } from '@core/fs/session';
 import { displayTitle } from '@core/paths';
 import { GithubClient, type FetchLike } from '@core/net/github';
@@ -87,6 +92,20 @@ export interface NotesState {
   settings: Settings;
   /** 同步进行中的阶段文案（空串 = 空闲）。 */
   syncStage: string;
+  /**
+   * 推送进行中的阶段文案（空串 = 空闲）。
+   *
+   * 与 `syncStage` 分开：两者可能同时在跑（"同步"里先拉后推），共用一个字段会互相覆盖，
+   * 用户看到的阶段就会跳来跳去。
+   */
+  pushStage: string;
+  /**
+   * 待推送的篇数（界面据此提醒）。
+   *
+   * 只由"真的算过一次推送集合"的地方更新 —— 不在启动时猜。要算准它必须重建清单
+   * （读一遍本地笔记），启动时不该干这个。
+   */
+  pushDirty: number;
   /** 上次同步的摘要，用于顶栏提示。 */
   lastSyncNote: string;
 
@@ -163,6 +182,16 @@ export interface NotesState {
    * 落盘时机由调用方决定（App 在切后台/退到后台时调），见 `session-state.ts` 的说明。
    */
   saveSession(): Promise<void>;
+  /**
+   * 推送本地改动到仓库。
+   *
+   * **先拉一次再推**：`lastCommit` 是"我们已知的远端状态"，推送要基于它建新提交。
+   * 不先拉的话，别处（电脑上的 Obsidian）刚推过就会撞上非快进，白白失败一次。
+   * 拉取本身在有 ETag 时几乎不花流量。
+   *
+   * 没有改动时什么都不做 —— 空提交只会污染历史。
+   */
+  pushNow(): Promise<void>;
   /** 主动报一个错（内链找不到目标、按需拉取失败等）。 */
   setError(message: string | null): void;
   /**
@@ -271,6 +300,20 @@ const byMtimeDesc =
 const orderPaths = (paths: string[], meta: Meta): string[] => [...paths].sort(byMtimeDesc(meta));
 
 /**
+ * 清单里记的远端视图，喂给三方判定。
+ *
+ * 抽出来是为了让"推送前估个数"和"真正推送时"用**同一个视图** —— 两处各写一遍的话，
+ * 界面显示的数量和实际推的数量迟早对不上。
+ */
+function remoteNotesOf(meta: Meta): RemoteNote[] {
+  const out: RemoteNote[] = [];
+  for (const [path, e] of Object.entries(meta.notes)) {
+    if (e.remoteSha) out.push({ path, sha: e.remoteSha, size: e.size });
+  }
+  return out;
+}
+
+/**
  * 还原"离开时的样子"。
  *
  * 三条纪律：
@@ -360,6 +403,8 @@ export const useNotes = create<NotesState>((set, get) => ({
   toast: null,
   settings: { ...DEFAULT_SETTINGS },
   syncStage: '',
+  pushStage: '',
+  pushDirty: 0,
   lastSyncNote: '',
   pullStage: '',
   pullDone: 0,
@@ -456,10 +501,13 @@ export const useNotes = create<NotesState>((set, get) => ({
       // 带上上次的提交与 ETag：远端没动时一个字节都不下载（实测省 20 倍时间）
       const snap = await fetchSnapshot(client, { lastCommit: meta.lastCommit, lastEtag: meta.treeEtag });
       if (!snap) {
+        const localDirty = dirtyCount(meta);
         set({
           syncStage: '',
+          pushDirty: localDirty,
           lastSyncNote: '远端没有变化，无需下载',
-          toast: '已是最新',
+          // 有未推送的本地改动就**明说**，别只报"已是最新"让人以为一切都同步好了
+          toast: localDirty > 0 ? `远端没有变化；本地有 ${localDirty} 篇改动待推送` : '已是最新',
         });
         await persistManifest({ ...meta, lastSyncAt: Date.now() });
         return;
@@ -743,7 +791,12 @@ export const useNotes = create<NotesState>((set, get) => ({
     await repo.remove(current);
     const notes = { ...meta.notes };
     delete notes[current];
-    const next = { ...meta, notes };
+    // 留一块墓碑：清单里删掉之后，远端还留着这条；不留记录的话下次同步根本看不出
+    // "本地删过"，删除就永远传不到远端（用户以为删了、其实还在）。
+    // 只有**远端确实有**这条时才需要墓碑；本地新建后没推过的，删了就没了，不用惊动远端。
+    const known = Boolean(meta.notes[current]?.remoteSha);
+    const removed = known ? [...new Set([...meta.removed, current])] : meta.removed;
+    const next = { ...meta, notes, removed };
     set({ meta: next, order: Object.keys(notes).sort(byMtimeDesc(next)), current: null, content: '', toast: `《${current}》已移入回收站` });
     // 当前笔记已经不在清单里了，状态里不能留着它（还原时会指向不存在的路径）
     void get().saveSession();
@@ -822,6 +875,147 @@ export const useNotes = create<NotesState>((set, get) => ({
   setScrollRatio(scrollRatio) {
     set({ scrollRatio });
   },
+  async pushNow() {
+    if (!repo) return;
+    const first = get();
+    if (!isConfigured(first.settings)) {
+      set({ error: '还没有配置同步仓库：请在设置里填「仓库」与「访问令牌」' });
+      return;
+    }
+    if (first.pushStage) return; // 已经在推，别叠第二份
+
+    // 先把本地有哪些文件、都有什么内容算出来。
+    //
+    // 为什么要重建清单而不是信任 manifest：`localSha` 是我们自己维护的，一旦它在某个
+    // 环节漂移，"以为没改"就会**漏推**。而漏推是静默的 —— 用户回到电脑上才发现改动不见了。
+    // 重建的代价是读一遍本地笔记（手机上就几百篇有内容），换来的是"推送集合一定正确"。
+    const local = await repo.buildManifest(first.meta.notes);
+    // 重建只认磁盘，而磁盘上**没有远端 sha**（那是清单独有的记录）。所以重建完要把
+    // 清单里的远端记录合回来，否则远端视图会变成空的："远端删了没有""远端有没有这条"
+    // 全部判不出来 —— 表现就是删除永远传不出去。
+    //
+    // 两边的分工必须分清（合错方向会静默出错）：
+    //   · **本地**（sha/大小/时间）以**重建结果**为准 —— 磁盘才是内容的权威；
+    //   · **远端**（remoteSha/syncedSha/标记）以**清单**为准 —— 磁盘上根本没有这些信息。
+    // 曾经写成 `{...清单, ...重建}`，看起来是"合回来了"，实际上重建里那些空 remoteSha
+    // 把清单的记录又盖没了，症状和没合一样。
+    const notes: Record<string, NoteEntry> = {};
+    for (const [path, e] of Object.entries({ ...local.notes, ...first.meta.notes })) {
+      const fresh = local.notes[path];
+      const known = first.meta.notes[path];
+      notes[path] = fresh
+        ? { ...fresh, remoteSha: known?.remoteSha ?? '', syncedSha: known?.syncedSha ?? '' }
+        : (e as NoteEntry);
+    }
+    const localMeta: Meta = { ...first.meta, notes };
+    // 只把**磁盘上真的存在**的路径交给三方判定（它决定"本地有没有"）
+    const localPaths = Object.keys(local.notes);
+    // 没有改动时连远端都不问 —— 白花请求。
+    //
+    // **必须同时看脏标记和 diff**，缺一不可：只看脏标记会把"标记丢了但内容真变了"漏掉
+    // （静默漏推）；只看 diff 又会把"改回原样但还带着脏标记"当成无改动而永远清不掉标记。
+    // `push-new` 也要算：新建的笔记远端还没有，只要它带着脏标记就说明用户确实写了东西。
+    //
+    // **删除也要算**：删掉一篇之后清单里已经没有它了，脏标记当然也没有 ——
+    // 只看脏标记的话"删了一篇"会被判成"没有改动"，删除就永远传不到远端。
+    const wouldPush = pathsToPush(
+      diffWithRemote(localMeta, [], localPaths),
+      (path) => ((first.meta.notes[path]?.flags ?? 0) & FLAG.DIRTY) !== 0,
+    );
+    const wouldDelete = first.meta.removed.length > 0;
+    if (dirtyCount(first.meta) === 0 && wouldPush.length === 0 && !wouldDelete) {
+      set({ meta: localMeta, pushDirty: 0, toast: '本地没有改动，无需推送' });
+      return;
+    }
+
+    set({ pushStage: '核对远端状态' });
+    try {
+      const settings = first.settings;
+      const client = new GithubClient({
+        token: settings.token,
+        repo: settings.repo,
+        branch: settings.branch,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+
+      // 先拉：把 lastCommit / lastTree 对齐到远端真实状态。
+      // 拉完 diff 才可信 —— 否则可能是基于一个已经过时的基准在推送。
+      const snap = await fetchSnapshot(client, {
+        lastCommit: first.meta.lastCommit,
+        lastEtag: first.meta.treeEtag,
+      });
+
+      let meta = localMeta;
+      if (snap) {
+        // 远端在我们上次同步之后动过：先把它的改动并进来再决定推什么。
+        // 这里可能产生冲突（两侧都改），冲突的篇目不会被推 —— 交给冲突流程处理。
+        meta = reconcileSnapshot(localMeta, snap);
+      }
+      set({
+        meta,
+        order: Object.keys(meta.notes).sort(byMtimeDesc(meta)),
+        pendingContent: pendingContentCount(meta),
+        pushDirty: pathsToPush(diffWithRemote(meta, remoteNotesOf(meta), localPaths)).length,
+      });
+      if (!meta.lastCommit || !meta.lastTree) {
+        set({ pushStage: '', error: '还没有同步过，无法确定推送的基准。请先同步一次。' });
+        return;
+      }
+
+      // 三方判定：拿"清单里记的远端 sha"当远端视图。
+      // 它刚被上面的 reconcile 对齐过，所以和直接读远端树等价，但**不用再下一次树**。
+      const diff = diffWithRemote(meta, remoteNotesOf(meta), localPaths);
+      const count = pathsToPush(diff).length + diff.deletedLocally.length;
+
+      set({ pushStage: `推送 ${count} 篇改动` });
+      const outcome = await pushNotes({
+        client,
+        baseCommit: meta.lastCommit,
+        baseTree: meta.lastTree,
+        diff,
+        // 只读"判定为要推"的那些文件：没改动的篇目一个字节都不读
+        readNote: (path) => repo!.readTextIfPresent(path),
+        // 只有用户真的改过（脏标记）的笔记才推。光"本地有、远端没有"不够 ——
+        // 那可能只是还没下载完的缓存，或者清单重建后失去共同基准的旧笔记。
+        isDirty: (path) => ((meta.notes[path]?.flags ?? 0) & FLAG.DIRTY) !== 0,
+        expectedSha: (path) => meta.notes[path]?.localSha ?? '',
+        message: pushMessage(pathsToPush(diff), diff.deletedLocally),
+      });
+
+      if (!outcome.ok) {
+        // 失败一律保留脏标记（`markPushed` 只在成功时调用）——宁可重复推，绝不漏推
+        set({ pushStage: '', error: `推送失败：${outcome.error ?? '原因未知'}` });
+        return;
+      }
+
+      const after = markPushed(meta, outcome.written, outcome.deleted);
+      // 提交前进了就记新的基准；没前进（空推）则保持原值
+      const advanced = outcome.commit !== meta.lastCommit;
+      const next: Meta = {
+        ...after,
+        lastCommit: advanced ? outcome.commit : meta.lastCommit,
+        lastTree: advanced ? outcome.tree : meta.lastTree,
+        lastSyncAt: advanced ? Date.now() : meta.lastSyncAt,
+        // 树变了，条件请求的 ETag 就不能再用了（继续用会拿到 304 而漏掉自己的这次改动）
+        treeEtag: advanced ? '' : meta.treeEtag,
+      };
+      set({
+        meta: next,
+        order: Object.keys(next.notes).sort(byMtimeDesc(next)),
+        pushStage: '',
+        pushDirty: dirtyCount(next),
+        toast: advanced ? `已推送 ${outcome.written.length + outcome.deleted.length} 篇改动` : '本地没有需要推送的改动',
+      });
+      await persistManifest(next);
+      // 推送成功才清 trash：那里是删除操作的兜底，同步成功前不能动
+      for (const path of outcome.deleted) await repo.dropTrash(path).catch(() => undefined);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const hint = (err as { hint?: string }).hint;
+      set({ pushStage: '', error: hint ? `${message}\n${hint}` : message });
+    }
+  },
+
   async saveSession() {
     if (!store) return;
     const { current, content, mode, dirty, scrollRatio, query } = get();
