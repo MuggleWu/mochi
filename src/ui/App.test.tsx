@@ -22,6 +22,8 @@ beforeEach(() => {
     mode: 'read',
     dirty: false,
     drawerOpen: false,
+    // 弹层状态不重置的话，上一个用例开着的查找栏/弹层会带进下一个用例
+    ui: { rename: false, sync: false, find: false },
     query: '',
     scrollRatio: 0,
     error: null,
@@ -108,5 +110,124 @@ describe('应用外壳', () => {
 
     await user.click(screen.getByText('确认删除'));
     await waitFor(async () => expect(await store.exists('notes/改过的名字.md')).toBe(false));
+  });
+});
+
+/**
+ * 查找与替换。
+ *
+ * 走真实点击链路：顶栏「查找」→ 输入 → 计数 → 上一个/下一个 → （编辑态）替换。
+ */
+describe('查找与替换', () => {
+  /** 造一篇有内容的笔记并回到阅读态。 */
+  async function writeNote(user: ReturnType<typeof userEvent.setup>, text: string) {
+    await waitFor(() => expect(screen.getByText(/打开笔记/)).toBeInTheDocument());
+    await user.click(screen.getByLabelText('打开目录'));
+    await user.click(screen.getByText('＋ 新建笔记'));
+    await user.type(await screen.findByPlaceholderText('在这里写点什么…'), text);
+    await user.click(screen.getByLabelText('进入阅读'));
+  }
+
+  it('阅读态：能打开查找栏，输入后显示命中计数', async () => {
+    const { user } = setup();
+    await writeNote(user, '供应链管理与供应链优化');
+
+    await user.click(screen.getByTitle(/查找/));
+    await user.type(screen.getByPlaceholderText('查找…'), '供应链');
+
+    // 阅读态的计数以 DOM 里实际标出来的为准。渲染管线是懒加载的：正文先按纯文本
+    // 顶上，模块就绪后换成 HTML、这时才打得上标记，所以这里必须 waitFor。
+    await waitFor(() => expect(screen.getByText(/^1 \/ 2$/)).toBeInTheDocument());
+    expect(document.querySelectorAll('mark[data-find]').length).toBe(2);
+    expect(document.querySelectorAll('mark[data-find-current]').length).toBe(1);
+  });
+
+  it('阅读态：下一个会循环回到第一处', async () => {
+    const { user } = setup();
+    await writeNote(user, '甲\n甲\n甲');
+    await user.click(screen.getByTitle(/查找/));
+    await user.type(screen.getByPlaceholderText('查找…'), '甲');
+    await waitFor(() => expect(screen.getByText(/^1 \/ 3$/)).toBeInTheDocument());
+
+    await user.click(screen.getByLabelText('下一个'));
+    expect(screen.getByText(/^2 \/ 3$/)).toBeInTheDocument();
+    await user.click(screen.getByLabelText('下一个'));
+    expect(screen.getByText(/^3 \/ 3$/)).toBeInTheDocument();
+    await user.click(screen.getByLabelText('下一个'));
+    // 循环，而不是卡在最后一处
+    expect(screen.getByText(/^1 \/ 3$/)).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText('上一个'));
+    expect(screen.getByText(/^3 \/ 3$/)).toBeInTheDocument();
+  });
+
+  it('没有命中时明说，而不是显示 0/0', async () => {
+    const { user } = setup();
+    await writeNote(user, '只有这一句');
+    await user.click(screen.getByTitle(/查找/));
+    await user.type(screen.getByPlaceholderText('查找…'), '不存在的词');
+    await waitFor(() => expect(screen.getByText('没有匹配')).toBeInTheDocument());
+  });
+
+  it('编辑态：多出替换行，能替换当前一处', async () => {
+    const { user, store } = setup();
+    // 两处分在不同行：替换必须跨行正确（只改命中的那几个字符，不能动换行）
+    await writeNote(user, '苹果和苹果\n第二行');
+    await user.click(screen.getByLabelText('进入编辑'));
+
+    await user.click(screen.getByTitle(/查找/));
+    await user.type(screen.getByPlaceholderText('查找…'), '苹果');
+    await waitFor(() => expect(screen.getByText(/^1 \/ 2$/)).toBeInTheDocument());
+
+    await user.type(screen.getByPlaceholderText('替换为…'), '橘子');
+    await user.click(screen.getByText('替换'));
+
+    // 只剩一处「苹果」了
+    await waitFor(() => expect(screen.getByText(/^1 \/ 1$/)).toBeInTheDocument());
+    await user.click(screen.getByLabelText('进入阅读'));
+    await waitFor(async () => expect(await store.readText('notes/未命名.md')).toBe('橘子和苹果\n第二行'));
+  });
+
+  it('编辑态：全部替换', async () => {
+    const { user, store } = setup();
+    await writeNote(user, '苹果和苹果和苹果');
+    await user.click(screen.getByLabelText('进入编辑'));
+
+    await user.click(screen.getByTitle(/查找/));
+    await user.type(screen.getByPlaceholderText('查找…'), '苹果');
+    await waitFor(() => expect(screen.getByText(/^1 \/ 3$/)).toBeInTheDocument());
+    await user.type(screen.getByPlaceholderText('替换为…'), '梨');
+    await user.click(screen.getByText('全部替换'));
+
+    await waitFor(() => expect(screen.getByText('没有匹配')).toBeInTheDocument());
+    await user.click(screen.getByLabelText('进入阅读'));
+    await waitFor(async () => expect(await store.readText('notes/未命名.md')).toBe('梨和梨和梨'));
+  });
+
+  it('替换串里的 $ 按字面量写进去（不会变成"整个匹配"）', async () => {
+    const { user, store } = setup();
+    await writeNote(user, '价格 X 元');
+    await user.click(screen.getByLabelText('进入编辑'));
+    await user.click(screen.getByTitle(/查找/));
+    await user.type(screen.getByPlaceholderText('查找…'), 'X');
+    await waitFor(() => expect(screen.getByText(/^1 \/ 1$/)).toBeInTheDocument());
+    await user.type(screen.getByPlaceholderText('替换为…'), '$&100');
+    await user.click(screen.getByText('替换'));
+    await user.click(screen.getByLabelText('进入阅读'));
+
+    // 若用了 String.replaceAll，这里会变成"价格 X100 元"
+    await waitFor(async () => expect(await store.readText('notes/未命名.md')).toBe('价格 $&100 元'));
+  });
+
+  it('关闭查找会清掉高亮', async () => {
+    const { user } = setup();
+    await writeNote(user, '测试文本');
+    await user.click(screen.getByTitle(/查找/));
+    await user.type(screen.getByPlaceholderText('查找…'), '测试');
+    await waitFor(() => expect(document.querySelectorAll('mark[data-find]').length).toBe(1));
+
+    await user.click(screen.getByLabelText('关闭查找'));
+    await waitFor(() => expect(document.querySelectorAll('mark[data-find]').length).toBe(0));
+    expect(screen.queryByPlaceholderText('查找…')).not.toBeInTheDocument();
   });
 });

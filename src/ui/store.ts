@@ -57,6 +57,14 @@ export interface NotesState {
   drawerEnterSeq: number;
   /** 阅读位置（百分比），读写态切换时保持 */
   scrollRatio: number;
+  /**
+   * 改名弹窗 / 同步弹层 / 查找栏是否开着。
+   *
+   * 这三个原本是组件内的 useState，提到 store 只为一个原因：**Android 返回键**。
+   * 返回键的处理要按"最上面那层先关"的顺序来（见 `back-stack.ts`），而处理函数
+   * 在 App 顶层，看不到子组件的局部状态。状态放这里，优先级才有一处可判。
+   */
+  ui: { rename: boolean; sync: boolean; find: boolean };
   error: string | null;
   toast: string | null;
   /** 同步配置（仓库/分支/令牌）。令牌只在内存与私有文件里。 */
@@ -113,6 +121,8 @@ export interface NotesState {
   settleDrawer(release?: { velocity: number; travelled: number }): void;
   setScrollRatio(r: number): void;
   dismissError(): void;
+  /** 开/关某个界面层（返回键与界面按钮共用同一处状态）。 */
+  setUi(key: 'rename' | 'sync' | 'find', open: boolean): void;
   /** 主动报一个错（内链找不到目标、按需拉取失败等）。 */
   setError(message: string | null): void;
   /**
@@ -204,6 +214,7 @@ export const useNotes = create<NotesState>((set, get) => ({
   indexed: 0,
   indexing: false,
   scrollRatio: 0,
+  ui: { rename: false, sync: false, find: false },
   error: null,
   toast: null,
   settings: { ...DEFAULT_SETTINGS },
@@ -557,6 +568,9 @@ export const useNotes = create<NotesState>((set, get) => ({
   },
   dismissError() {
     set({ error: null });
+  },
+  setUi(key, open) {
+    set({ ui: { ...get().ui, [key]: open } });
   },
   setError(message) {
     set({ error: message });

@@ -1,15 +1,19 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
 import { CapacitorFileStore } from '@core/fs/capacitor-fs';
 import { MemoryFileStore } from '@core/fs/memory-fs';
 import type { FileStore } from '@core/fs/store';
 import { displayTitle, sanitizeNoteName } from '@core/paths';
 import { Drawer } from './Drawer';
+import { decideBack } from './back-stack';
 import { ContentBar } from './ContentBar';
 import { useEdgeSwipe } from './useEdgeSwipe';
 import { prefetchMarkdown } from './md';
 import { watchKeyboardHeight } from './viewport';
 import { SyncSheet } from './SyncSheet';
+import { FindBar } from './FindBar';
+import { findMatches, matchLabel, replaceAllLiteral, replaceOne, stepIndex } from './find';
 import { Editor } from './Editor';
 import { EmptyReader, Reader } from './Reader';
 import { useNotes } from './store';
@@ -44,9 +48,52 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
   const dismissError = useNotes((s) => s.dismissError);
   const syncStage = useNotes((s) => s.syncStage);
 
-  const [renaming, setRenaming] = useState(false);
-  const [syncOpen, setSyncOpen] = useState(false);
+  const ui = useNotes((s) => s.ui);
+  const setUi = useNotes((s) => s.setUi);
   const [toastVisible, setToastVisible] = useState(false);
+
+  const [query, setQuery] = useState('');
+  const [replaceText, setReplaceText] = useState('');
+  const [findIndex, setFindIndex] = useState(0);
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  /**
+   * 阅读态实际标出来的命中数（见 Reader 的 onMarked）。编辑态不用它 —— 编辑器是
+   * 直接对源文做匹配，源文里有多少处就是多少处。
+   */
+  const [markedCount, setMarkedCount] = useState(0);
+
+  const matches = useMemo(() => findMatches(content, query, { caseSensitive }), [content, query, caseSensitive]);
+  // 阅读态以 DOM 里的实际标记数为准，避免"共 5 处却只跳得到 3 处"
+  const total = mode === 'read' ? markedCount : matches.length;
+  const currentMatch = matches[clampIndex(findIndex, total)] ?? null;
+
+  // 查询或匹配数一变就回到第一处：不然停在旧的第 7 处、而新查询只有 2 处，会跳到奇怪的位置
+  useEffect(() => {
+    setFindIndex(0);
+  }, [query, caseSensitive]);
+
+  // 切笔记时把查找整个收掉：留着会在新笔记上莫名其妙高亮，用户还以为内容坏了
+  useEffect(() => {
+    setQuery('');
+    setReplaceText('');
+    setFindIndex(0);
+  }, [current]);
+
+  const step = (delta: number): void => setFindIndex((i) => stepIndex(i, total, delta));
+
+  const replaceCurrent = (): void => {
+    if (!currentMatch) return;
+    const next = replaceOne(content, currentMatch, replaceText);
+    setContent(next);
+    // 替换后当前项的位置会变（长度不一样），重新从第一处开始最不容易出错
+    setFindIndex(0);
+  };
+
+  const replaceEvery = (): void => {
+    if (!query) return;
+    setContent(replaceAllLiteral(content, query, replaceText, { caseSensitive }));
+    setFindIndex(0);
+  };
 
   useEffect(() => {
     void init(injected ?? pickStore());
@@ -62,6 +109,55 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
     return () => clearTimeout(t);
   }, [toast]);
 
+  /**
+   * Android 返回键。
+   *
+   * 不处理的话它走 Capacitor 默认行为 = **直接退出应用**，于是"抽屉开着按返回"
+   * 和"想关个弹层"都会把整个应用关掉 —— 用户实际遇到的就是这个。
+   *
+   * 优先级见 `back-stack.ts`：弹层 → 查找栏 → 抽屉 → 编辑态 → 交给系统退出。
+   */
+  useEffect(() => {
+    let handle: { remove(): Promise<void> } | undefined;
+    void CapApp.addListener('backButton', () => {
+      const st = useNotes.getState();
+      const action = decideBack({
+        rename: st.ui.rename,
+        sync: st.ui.sync,
+        find: st.ui.find,
+        drawer: st.drawerOpen,
+        editing: st.mode === 'edit',
+      });
+      if (action.kind === 'exit') {
+        void CapApp.exitApp();
+        return;
+      }
+      switch (action.layer) {
+        case 'rename':
+        case 'sync':
+        case 'find':
+          st.setUi(action.layer, false);
+          break;
+        case 'drawer':
+          st.setDrawer(false);
+          break;
+        case 'editor':
+          // 退回阅读态前**必须先保存**：用户以为"退出来了"，实际改动还在内存里的话，
+          // 再按一次返回就把应用关了，改动一起没。保存是异步的，所以先存再切。
+          void (async () => {
+            if (useNotes.getState().dirty) await useNotes.getState().saveNote();
+            useNotes.getState().setMode('read');
+          })();
+          break;
+      }
+    }).then((h) => {
+      handle = h;
+    });
+    return () => {
+      void handle?.remove();
+    };
+  }, []);
+
   const toggleMode = async (): Promise<void> => {
     if (mode === 'edit' && dirty) await saveNote();
     setMode(mode === 'edit' ? 'read' : 'edit');
@@ -69,7 +165,7 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
 
   const startRename = (): void => {
     if (!current) return;
-    setRenaming(true);
+    setUi('rename', true);
   };
 
   // 键盘占位：把"被键盘遮住的高度"写进 --bottom-blocked（见 styles.css）。
@@ -98,9 +194,14 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
           {current ? displayTitle(current) : 'mochi'}
           {dirty ? ' •' : ''}
         </div>
-        <button className="pill" onClick={() => setSyncOpen(true)} title="同步设置与拉取">
+        <button className="pill" onClick={() => setUi('sync', true)} title="同步设置与拉取">
           {syncStage || '同步'}
         </button>
+        {current && (
+          <button className="pill" onClick={() => setUi('find', !ui.find)} title="查找（编辑态还能替换）">
+            查找
+          </button>
+        )}
       </header>
 
       {error && (
@@ -110,14 +211,43 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
         </div>
       )}
 
+      {ui.find && current && (
+        <FindBar
+          mode={mode}
+          query={query}
+          onQueryChange={setQuery}
+          replaceText={replaceText}
+          onReplaceTextChange={setReplaceText}
+          matches={matches}
+          index={findIndex}
+          caseSensitive={caseSensitive}
+          onToggleCase={() => setCaseSensitive((v) => !v)}
+          onStep={step}
+          onReplaceOne={replaceCurrent}
+          onReplaceAll={replaceEvery}
+          onClose={() => setUi('find', false)}
+          label={matchLabel(total, findIndex, query)}
+          autoFocus
+        />
+      )}
+
       <ContentBar />
 
       <main className="main">
         {ready && !current && <EmptyReader />}
         {current && mode === 'read' && (
-          <Reader content={content} initialRatio={scrollRatio} onRatioChange={setScrollRatio} />
+          <Reader
+            content={content}
+            initialRatio={scrollRatio}
+            onRatioChange={setScrollRatio}
+            query={ui.find ? query : ''}
+            findIndex={findIndex}
+            onMarked={setMarkedCount}
+          />
         )}
-        {current && mode === 'edit' && <Editor content={content} onChange={setContent} initialRatio={scrollRatio} />}
+        {current && mode === 'edit' && (
+          <Editor content={content} onChange={setContent} initialRatio={scrollRatio} match={ui.find ? currentMatch : null} />
+        )}
 
         {current && (
           <button className="fab" onClick={() => void toggleMode()} aria-label={mode === 'edit' ? '进入阅读' : '进入编辑'}>
@@ -129,19 +259,19 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
         {toastVisible && toast && <div className="toast">{toast}</div>}
       </main>
 
-      {syncOpen && <SyncSheet onClose={() => setSyncOpen(false)} />}
+      {ui.sync && <SyncSheet onClose={() => setUi('sync', false)} />}
 
-      {renaming && current && (
+      {ui.rename && current && (
         <RenameDialog
           initial={displayTitle(current)}
-          onCancel={() => setRenaming(false)}
+          onCancel={() => setUi('rename', false)}
           onConfirm={async (next) => {
-            setRenaming(false);
+            setUi('rename', false);
             const name = sanitizeNoteName(next);
             if (name !== current) await renameNote(name);
           }}
           onDelete={async () => {
-            setRenaming(false);
+            setUi('rename', false);
             await deleteNote();
           }}
         />
@@ -225,4 +355,10 @@ function RenameDialog({ initial, onCancel, onConfirm, onDelete }: RenameProps): 
       </div>
     </div>
   );
+}
+
+/** 把索引夹进 [0, total)：换笔记、匹配数变少时索引可能越界。 */
+function clampIndex(index: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.min(index, total - 1);
 }

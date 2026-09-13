@@ -591,3 +591,83 @@ body {
   z-index: 30;
   pointer-events: none;
 }
+
+/* ---- 查找栏（阅读态查找，编辑态多一行替换） ---- */
+.find-bar {
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--line);
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.find-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.find-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.find-input:focus {
+  outline: none;
+  border-color: var(--accent, #4a9);
+}
+
+/* 计数用等宽数字，否则 "1 / 12" 跳到 "2 / 12" 时整行会微微抖动 */
+.find-count {
+  font-size: 12px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 56px;
+  text-align: right;
+}
+
+.find-btn {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-width: 30px;
+  height: 28px;
+  padding: 0 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.find-btn.wide { padding: 0 10px; }
+
+.find-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 区分大小写是开关态，得看得出开着 */
+.find-btn.on {
+  border-color: var(--accent, #4a9);
+  color: var(--accent, #4a9);
+}
+
+/* 阅读态的命中高亮。当前项用更实的底色，滚动定位后一眼能找到 */
+.md mark[data-find] {
+  background: #ffe08a;
+  color: inherit;
+  border-radius: 2px;
+}
+
+.md mark[data-find-current] {
+  background: #ffab3d;
+  color: #1a1a1a;
+}
