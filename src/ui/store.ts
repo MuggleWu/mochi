@@ -45,6 +45,8 @@ import { shouldSnapOpen } from './edge-swipe';
 import { DRAWER_SETTLE_MS } from './drawer-anim';
 import { search, type SearchIndex } from '@core/search/index';
 import { loadIndex, saveIndex, indexNotes, indexOne, type IndexNote } from '@core/search/store';
+import { updateNote } from '@core/search/index';
+import { auditIndexAgainstText } from '@core/search/audit';
 import { mergeRows, snippetFor, type SearchRow } from './search-view';
 
 export type Mode = 'read' | 'edit';
@@ -1212,6 +1214,38 @@ export const useNotes = create<NotesState>((set, get) => ({
         indexVersion += 1;
         await saveIndex(store!, index);
         indexSavedVersion = indexVersion;
+      }
+
+      /*
+       * 一致性核对：确认"索引里挂着某个词的笔记，正文里真的有这个词"。
+       *
+       * 为什么需要它：搜索只查倒排表，从不回头看正文。而倒排表是增量维护的
+       * （摘旧 gram、挂新 gram），万一某一步漏摘，表现就是**搜一个词、搜出一篇根本
+       * 没有这个词的笔记** —— 这类 bug 读代码看不出来，每个环节单独看都对。
+       *
+       * 代价：对已索引的笔记各读一遍正文。放在后台分批建索引的这条路上，代价可接受；
+       * 结果不弹窗、只落到 `lastSyncNote`，避免把内部状态泄漏给界面。
+       */
+      if (batch.length > 0) {
+        const drift = auditIndexAgainstText(
+          index,
+          batch.map((b) => b.path),
+          (path) => batch.find((b) => b.path === path)?.content ?? null,
+        );
+        const stale = drift.filter((d) => d.extraGrams > 0);
+        if (stale.length > 0) {
+          set({
+            lastSyncNote: `索引自检发现 ${stale.length} 篇的命中可能对不上正文，已重建这几篇的索引`,
+          });
+          // 有假命中来源就直接把这些篇重灌一遍，从当前正文重建它们的 gram
+          for (const d of stale) {
+            const note = batch.find((b) => b.path === d.path);
+            if (note) updateNote(index, { path: note.path, content: note.content, sha: note.sha });
+          }
+          indexVersion += 1;
+          await saveIndex(store!, index);
+          indexSavedVersion = indexVersion;
+        }
       }
       set({
         indexing: false,

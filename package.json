@@ -1,6 +1,6 @@
 {
   "name": "mochi",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "type": "module",
   "description": "Lightweight Android client for reading, editing, and syncing a Git-hosted Markdown vault over the GitHub API.",
