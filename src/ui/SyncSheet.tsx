@@ -5,6 +5,7 @@
  * 错误提示里也不会带出令牌内容。
  */
 import { useState } from 'react';
+import { normalizeRepo } from '@core/sync/settings';
 import { useNotes } from './store';
 
 interface Props {
@@ -24,12 +25,32 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
   const [token, setToken] = useState(settings.token);
   const [busy, setBusy] = useState(false);
 
-  const configured = Boolean(repo && token && branch);
-  const repoLooksOk = !repo || /^[^/\s]+\/[^/\s]+$/.test(repo);
+  // 校验只认**归一后**的值：用户粘完整 URL（笔记里存的就是那种）是完全正常的操作，
+  // 不该被判成格式错误。下面这三种写法都会被归一成同一个 owner/name：
+  //   owner/name · https://github.com/owner/name · https://github.com/owner/name.git
+  // 归一结果里必须恰好有一个 `/`，且两边非空 —— 这才排除了"归一不了"（原样返回）的情况。
+  const normalized = normalizeRepo(repo);
+  const slash = normalized.indexOf('/');
+  const repoBad = repo.trim() !== '' && (slash <= 0 || slash === normalized.length - 1);
+  const configured = Boolean(normalized && token && branch);
+
+  /**
+   * 失焦时就把字段换成归一后的值。
+   *
+   * 为什么要回填而不是只存归一值：用户得**看见**自己粘的 URL 变成了什么，
+   * 否则仓库填错了要等同步 404 才知道，而 404 的提示里还列着"令牌没授权"这个可能，
+   * 会把人往错方向带。改完立刻可见 = 立刻能自己发现错。
+   */
+  const tidyRepo = (): void => {
+    const next = normalizeRepo(repo);
+    if (next !== repo) setRepo(next);
+  };
 
   const run = async (): Promise<void> => {
     setBusy(true);
-    await saveConfig({ repo: repo.trim(), branch: branch.trim() || 'master', token: token.trim() });
+    const finalRepo = normalizeRepo(repo);
+    setRepo(finalRepo); // 让面板里显示的就是真正存下去的值
+    await saveConfig({ repo: finalRepo, branch: branch.trim() || 'master', token: token.trim() });
     await pullMetadata();
     setBusy(false);
     // 成功就自动关：清单已经到手，**内容下载还在后台跑**（顶栏下面会出现进度条），
@@ -68,18 +89,21 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
       >
         <div style={{ fontWeight: 600, marginBottom: 12 }}>同步设置</div>
 
-        <label style={{ display: 'block', fontSize: 13, color: 'var(--fg-dim)', marginBottom: 4 }}>仓库（owner/name）</label>
+        <label style={{ display: 'block', fontSize: 13, color: 'var(--fg-dim)', marginBottom: 4 }}>仓库</label>
         <input
           style={field}
           value={repo}
           onChange={(e) => setRepo(e.target.value)}
-          placeholder="例如 your-name/your-notes"
+          onBlur={tidyRepo}
+          placeholder="owner/name 或 https://github.com/owner/name"
           autoCapitalize="off"
           autoCorrect="off"
           spellCheck={false}
         />
-        {!repoLooksOk && (
-          <div style={{ color: '#b3261e', fontSize: 12, marginTop: 4 }}>要写成 owner/name 的形式</div>
+        {repoBad && (
+          <div style={{ color: '#b3261e', fontSize: 12, marginTop: 4 }}>
+            认不出仓库名。填 owner/name，或直接粘仓库地址（https://github.com/owner/name 这种）。
+          </div>
         )}
 
         <label style={{ display: 'block', fontSize: 13, color: 'var(--fg-dim)', margin: '12px 0 4px' }}>分支</label>
@@ -106,7 +130,7 @@ export function SyncSheet({ onClose }: Props): React.JSX.Element {
           <button className="pill" onClick={onClose}>
             关闭
           </button>
-          <button className="pill" disabled={!configured || !repoLooksOk || busy} onClick={() => void run()} style={{ marginLeft: 'auto' }}>
+          <button className="pill" disabled={!configured || repoBad || busy} onClick={() => void run()} style={{ marginLeft: 'auto' }}>
             {busy || syncStage ? syncStage || '同步中…' : '保存并拉取'}
           </button>
         </div>
