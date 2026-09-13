@@ -23,3 +23,8 @@ keystore.properties
 .idea/
 .vscode/
 *.iml
+
+# 本地运维脚本（只在我这台机器上用，不属于项目本身）
+sweep.mts
+monitor.mts
+monitor.log

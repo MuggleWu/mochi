@@ -156,7 +156,7 @@ describe('推送编排（store 层）', () => {
       lastCommit: 'COMMIT_remote',
       lastTree: 'TREE_remote',
       notes: { '乙.md': entry('乙.md', sha, sha, sha) },
-      removed: ['乙.md'],
+      removed: [{ path: '乙.md', remoteSha: sha }],
     };
     // 磁盘上已经没有它了（软删除后只剩 trash）
     await boot({}, meta);
@@ -166,6 +166,42 @@ describe('推送编排（store 层）', () => {
     expect(useNotes.getState().error).toBeNull();
     expect(remote['乙.md']).toBeUndefined(); // 远端真的没了
     expect(useNotes.getState().meta.removed).toEqual([]); // 墓碑已清
+  });
+
+  it('**走真实的删除动作**也要能把删除推到远端', async () => {
+    // 上面那条"墓碑"用例是**手搓的 meta**：它保留了 `notes['乙.md']`，而真实删除
+    // 恰恰会把这条从 notes 里删掉 —— 于是那条测试跑的是一个真实中不会出现的状态，
+    // 反而绕过了真 bug。
+    //
+    // 真实的因果链是这样的：
+    //   删除 → notes 里没了 → 远端视图（靠 notes 的 remoteSha 拼）里也没了
+    //        → 墓碑被判成"远端本来就没有" → 推送集合为空 → 点推送什么都不做
+    // 表现是**静默的**：不报错，只说一句"本地没有需要推送的改动"，用户以为删掉了。
+    const content = '要被删掉的内容';
+    const sha = await blobShaOfText(content);
+    remote = { '丙.md': content };
+    remoteTreeSha = 'TREE_remote';
+    remoteRefSha = 'COMMIT_remote';
+    const meta: Meta = {
+      ...emptyMeta(),
+      lastCommit: 'COMMIT_remote',
+      lastTree: 'TREE_remote',
+      notes: { '丙.md': entry('丙.md', sha, sha, sha) },
+    };
+    await boot({ '丙.md': content }, meta);
+    await useNotes.getState().openNote('丙.md'); // 必须等：current 没设上，删除会直接返回
+
+    // 就用应用自己的删除动作，不手搓状态
+    await useNotes.getState().deleteNote();
+    expect(useNotes.getState().meta.removed.map((t) => t.path)).toContain('丙.md');
+    // 墓碑要自带远端 sha：只留路径的话，推送时凑不出有效判定，删除会静默失效
+    expect(useNotes.getState().meta.removed[0]?.remoteSha).toBe(sha);
+
+    await useNotes.getState().pushNow();
+
+    expect(useNotes.getState().error).toBeNull();
+    expect(remote['丙.md']).toBeUndefined(); // 远端真的没了
+    expect(useNotes.getState().meta.removed).toEqual([]); // 确认生效后墓碑才清
   });
 
   it('清单重建丢了远端记录时，也不能凭"本地有、远端没有"就推', async () => {

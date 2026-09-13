@@ -286,14 +286,15 @@ describe('本地删过的笔记要传到远端（墓碑）', () => {
   });
 
   it('推送成功后清掉墓碑（否则下次会重复删、也看不出已经一致了）', async () => {
-    const meta: Meta = { ...emptyMeta(), removed: ['甲.md', '乙.md'] };
+    const meta: Meta = { ...emptyMeta(), removed: [{ path: '甲.md', remoteSha: 's1' }, { path: '乙.md', remoteSha: 's2' }] };
     const next = markPushed(meta, [], ['甲.md']);
-    expect(next.removed).toEqual(['乙.md']);
+    // 只清掉被确认删除的那条，另一条原样留着（含它自带的远端 sha）
+    expect(next.removed).toEqual([{ path: '乙.md', remoteSha: 's2' }]);
   });
 
   it('推送失败时墓碑必须留着（不然删除就丢了）', () => {
-    const meta: Meta = { ...emptyMeta(), removed: ['甲.md'] };
+    const meta: Meta = { ...emptyMeta(), removed: [{ path: '甲.md', remoteSha: 's1' }] };
     // 失败路径根本不调 markPushed —— 这里只是把这条约定钉住
-    expect(meta.removed).toEqual(['甲.md']);
+    expect(meta.removed).toEqual([{ path: '甲.md', remoteSha: 's1' }]);
   });
 });

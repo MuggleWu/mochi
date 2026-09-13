@@ -81,6 +81,22 @@ export function pendingContentCount(meta: Meta): number {
   return n;
 }
 
+/**
+ * 一条墓碑：本地删过、还没同步到远端的笔记。
+ *
+ * **必须自带 `remoteSha`**（远端在删除那一刻的内容）。原因是这个信息别处都没有：
+ * 远端 sha 只记在清单的 `notes[path]` 里，而删除动作会把那条整个移走 —— 于是删除之后，
+ * "远端现在是什么"就再也查不到了。曾经只记 path，结果推送时凑不出一份有效判定：
+ * 远端视图里没有这条 → 判成"远端本来就没有" → 删除什么都不做，**还不报错**。
+ *
+ * 带上 sha 之后墓碑是自足的：不依赖任何别处的记忆，应用重启、清单重建都不影响。
+ */
+export interface Tombstone {
+  path: string;
+  /** 删除那一刻远端的内容 sha。没有远端记录的（新建后没推过）不该留墓碑。 */
+  remoteSha: string;
+}
+
 export interface Meta {
   schemaVersion: number;
   /** 目标仓库，形如 `owner/repo`（由用户在设置里填，不写进代码）。 */
@@ -101,14 +117,14 @@ export interface Meta {
   /** 尚未解决的冲突（必须持久化，见文件头注释）。 */
   conflicts: string[];
   /**
-   * 本地已删、但**还没同步到远端**的路径（墓碑）。
+   * 本地已删、但**还没同步到远端**的条目（墓碑）。
    *
    * 为什么必须在清单里留个记录：删掉之后清单里就没有这条了，远端却还有 ——
    * 下一次同步只能看到"远端有、本地没有"，而"本地没删过"和"本地删了但还没推"在
    * 清单上看**一模一样**。少了这个记录，删除永远传不到远端，用户会以为删了、其实还在。
    * 推送成功后才清掉它，并把 trash 里的备份一起清掉。
    */
-  removed: string[];
+  removed: Tombstone[];
   /** 上次成功同步的时间。 */
   lastSyncAt: number;
   /**
@@ -206,7 +222,7 @@ export function diffWithRemote(meta: Meta, remote: RemoteNote[], newLocalPaths: 
   const changes: Change[] = [];
   // 墓碑：本地删过、远端还在 —— 远端也要删。远端已经没有了就顺手清掉墓碑（已经一致了）。
   const remoteNow = new Set(remote.map((r) => r.path));
-  const removedLocally = meta.removed.filter((p) => remoteNow.has(p));
+  const removedLocally = meta.removed.filter((t) => remoteNow.has(t.path)).map((t) => t.path);
   // 墓碑路径要从"远端新增"里排除掉 —— 否则它会**同时**被判为待删除和待拉取，
   // 结果是把刚删掉的笔记又下载回来，用户看到的还是"删了又回来了"。
   const tombstoned = new Set(removedLocally);
@@ -314,7 +330,7 @@ export function serializeMeta(meta: Meta): string {
     lastTree: meta.lastTree,
     treeEtag: meta.treeEtag,
     conflicts: meta.conflicts,
-    removed: meta.removed,
+    removed: meta.removed.map((t) => [t.path, t.remoteSha]),
     lastSyncAt: meta.lastSyncAt,
     fileMtimes: meta.fileMtimes,
     histFrontier: meta.histFrontier,
@@ -342,7 +358,20 @@ export function deserializeMeta(text: string): Meta {
   meta.treeEtag = typeof o['treeEtag'] === 'string' ? o['treeEtag'] : '';
   meta.conflicts = Array.isArray(o['conflicts']) ? o['conflicts'].filter((x): x is string => typeof x === 'string') : [];
   // 老清单没有这个字段 → 当成"没有待同步的删除"（默认值，不是错误）
-  meta.removed = Array.isArray(o['removed']) ? o['removed'].filter((x): x is string => typeof x === 'string') : [];
+  // 墓碑写成 [路径, 远端 sha] 的二元组。老清单里是纯路径数组（那时还没记 sha），
+  // 照旧读进来、sha 留空 —— 那样的墓碑推不动删除（无从判定远端），
+  // 但**绝不能因此丢掉它**：它是"本地删过"的唯一证据。
+  meta.removed = Array.isArray(o['removed'])
+    ? o['removed']
+        .map((x): Tombstone | null => {
+          if (typeof x === 'string') return { path: x, remoteSha: '' };
+          if (Array.isArray(x) && typeof x[0] === 'string') {
+            return { path: x[0], remoteSha: typeof x[1] === 'string' ? x[1] : '' };
+          }
+          return null;
+        })
+        .filter((t): t is Tombstone => t !== null)
+    : [];
   meta.lastSyncAt = typeof o['lastSyncAt'] === 'number' ? o['lastSyncAt'] : 0;
   meta.histFrontier = typeof o['histFrontier'] === 'string' ? o['histFrontier'] : '';
   const fm = o['fileMtimes'];
@@ -399,5 +428,5 @@ export function markPushed(meta: Meta, written: readonly string[], deleted: read
   for (const path of deleted) delete notes[path];
   // 删除确认生效，墓碑就可以撤了 —— 之后再同步也不会把"远端没有"误判成"没删过"
   const gone = new Set(deleted);
-  return { ...meta, notes, removed: meta.removed.filter((p) => !gone.has(p)) };
+  return { ...meta, notes, removed: meta.removed.filter((t) => !gone.has(t.path)) };
 }

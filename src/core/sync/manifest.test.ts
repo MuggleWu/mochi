@@ -210,7 +210,7 @@ describe('状态位', () => {
 
 describe('删除要在清单里留墓碑（否则永远传不到远端）', () => {
   it('清单里记着"本地删过"、远端还在 → 判为待删除', () => {
-    const meta: Meta = { ...emptyMeta(), removed: ['删掉的.md'] };
+    const meta: Meta = { ...emptyMeta(), removed: [{ path: '删掉的.md', remoteSha: 'sha-删掉的' }] };
     const d = diffWithRemote(meta, [{ path: '删掉的.md', sha: 'R', size: 5 }]);
     expect(d.removedLocally).toEqual(['删掉的.md']);
     // 关键：它**不能**被当成"远端新增、没见过"，那样会被重新拉回来，删除等于没做
@@ -218,13 +218,13 @@ describe('删除要在清单里留墓碑（否则永远传不到远端）', () =
   });
 
   it('远端已经没有它了 → 墓碑不用再提（已经一致）', () => {
-    const meta: Meta = { ...emptyMeta(), removed: ['删掉的.md'] };
+    const meta: Meta = { ...emptyMeta(), removed: [{ path: '删掉的.md', remoteSha: 'sha-删掉的' }] };
     const d = diffWithRemote(meta, []);
     expect(d.removedLocally).toEqual([]);
   });
 
   it('摘要里删除数把墓碑算进去（界面显示的数量要和实际动作一致）', () => {
-    const meta: Meta = { ...emptyMeta(), removed: ['删掉的.md'] };
+    const meta: Meta = { ...emptyMeta(), removed: [{ path: '删掉的.md', remoteSha: 'sha-删掉的' }] };
     const d = diffWithRemote(meta, [{ path: '删掉的.md', sha: 'R', size: 5 }]);
     expect(summarize(d).toDelete).toBe(1);
   });

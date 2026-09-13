@@ -70,8 +70,17 @@ export function reconcileSnapshot(meta: Meta, snap: RemoteSnapshot, now = Date.n
   const notes = { ...meta.notes };
   const remotePaths = new Set<string>();
 
+  // 墓碑指向的路径**不能碰**。
+  //
+  // 删除动作会把这条从 `notes` 里整个移走（远端 sha 也随之消失），所以从这份快照看来
+  // 它就像"远端新出现的笔记"，会被当成新条目加回来 —— 于是"本地删过、远端还在"这个状态
+  // 在推送前就被抹平了：三方判定只看到一条"没改过的笔记"，推送集合为空，**删除永远传不出去**，
+  // 而且不报错，只说一句"无需推送"。
+  const tombstoned = new Set(meta.removed.map((t) => t.path));
+
   for (const f of snap.files) {
     remotePaths.add(f.path);
+    if (tombstoned.has(f.path)) continue; // 等推送去远端删掉它，别在这里把它复活
     const prev = notes[f.path];
     if (prev) {
       notes[f.path] = { ...prev, remoteSha: f.sha, size: prev.size || f.size };

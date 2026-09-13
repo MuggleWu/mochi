@@ -86,7 +86,10 @@ check((await count()) === baseline + 1, `再推一次没有多出文件（${awai
 
 // ── 4. 删除再推 ───────────────────────────────
 await useNotes.getState().deleteNote();
-check(useNotes.getState().meta.removed.includes(NAME), '删除留下了墓碑（否则删除传不出去）');
+const tombstones = useNotes.getState().meta.removed;
+check(tombstones.some((t) => t.path === NAME), '删除留下了墓碑（否则删除传不出去）');
+// 墓碑要自带远端 sha：只留路径的话，推送时凑不出有效判定，删除会静默失效
+check(Boolean(tombstones.find((t) => t.path === NAME)?.remoteSha), '墓碑自带远端 sha（自足，不依赖别处记忆）');
 await useNotes.getState().pushNow();
 check(useNotes.getState().error === null, `删除推送无错误${useNotes.getState().error ? '（' + useNotes.getState().error + '）' : ''}`);
 check((await readRemote(NAME)) === null, '远端这篇已经消失');

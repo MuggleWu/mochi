@@ -310,6 +310,15 @@ function remoteNotesOf(meta: Meta): RemoteNote[] {
   for (const [path, e] of Object.entries(meta.notes)) {
     if (e.remoteSha) out.push({ path, sha: e.remoteSha, size: e.size });
   }
+  // 墓碑自带远端 sha，所以"远端还有这条"这件事在删除之后依然查得到。
+  // 少了它，删除动作会把自己后续要用的信息一起毁掉：远端视图里没有这条，
+  // 三方判定就认为"远端本来就没有"，删除什么都不做 —— 而且不报错。
+  const known = new Set(out.map((r) => r.path));
+  for (const t of meta.removed) {
+    if (known.has(t.path)) continue;
+    if (!t.remoteSha) continue; // 老清单里的墓碑没记 sha，无从判定远端，只能不动它
+    out.push({ path: t.path, sha: t.remoteSha, size: 0 });
+  }
   return out;
 }
 
@@ -794,8 +803,12 @@ export const useNotes = create<NotesState>((set, get) => ({
     // 留一块墓碑：清单里删掉之后，远端还留着这条；不留记录的话下次同步根本看不出
     // "本地删过"，删除就永远传不到远端（用户以为删了、其实还在）。
     // 只有**远端确实有**这条时才需要墓碑；本地新建后没推过的，删了就没了，不用惊动远端。
-    const known = Boolean(meta.notes[current]?.remoteSha);
-    const removed = known ? [...new Set([...meta.removed, current])] : meta.removed;
+    // 墓碑要**自带**远端 sha：这条记录马上就不在 notes 里了，而"远端现在是什么"只记在
+    // notes 里 —— 只留路径的话，推送时凑不出一份有效判定，删除会静默失效。
+    const remoteSha = meta.notes[current]?.remoteSha ?? '';
+    const removed = remoteSha
+      ? [...meta.removed.filter((t) => t.path !== current), { path: current, remoteSha }]
+      : meta.removed;
     const next = { ...meta, notes, removed };
     set({ meta: next, order: Object.keys(notes).sort(byMtimeDesc(next)), current: null, content: '', toast: `《${current}》已移入回收站` });
     // 当前笔记已经不在清单里了，状态里不能留着它（还原时会指向不存在的路径）
@@ -907,6 +920,7 @@ export const useNotes = create<NotesState>((set, get) => ({
         ? { ...fresh, remoteSha: known?.remoteSha ?? '', syncedSha: known?.syncedSha ?? '' }
         : (e as NoteEntry);
     }
+
     const localMeta: Meta = { ...first.meta, notes };
     // 只把**磁盘上真的存在**的路径交给三方判定（它决定"本地有没有"）
     const localPaths = Object.keys(local.notes);
@@ -919,7 +933,7 @@ export const useNotes = create<NotesState>((set, get) => ({
     // **删除也要算**：删掉一篇之后清单里已经没有它了，脏标记当然也没有 ——
     // 只看脏标记的话"删了一篇"会被判成"没有改动"，删除就永远传不到远端。
     const wouldPush = pathsToPush(
-      diffWithRemote(localMeta, [], localPaths),
+      diffWithRemote(localMeta, remoteNotesOf(localMeta), localPaths),
       (path) => ((first.meta.notes[path]?.flags ?? 0) & FLAG.DIRTY) !== 0,
     );
     const wouldDelete = first.meta.removed.length > 0;
