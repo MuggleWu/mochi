@@ -15,7 +15,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "cap:sync": "npm run build && cap sync android",
-    "android:build": "cd android && ./gradlew assembleDebug"
+    "android:build": "cd android && ./gradlew assembleDebug",
+    "bench:index": "vitest run bench/index.bench.test.ts"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.2",

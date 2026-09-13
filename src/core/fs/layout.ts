@@ -11,6 +11,7 @@ export const STATE_DIR = 'state';
 
 export const MANIFEST_FILE = `${STATE_DIR}/manifest.json`;
 export const META_FILE = `${STATE_DIR}/meta.json`;
+export const GRAMS_FILE = `${STATE_DIR}/grams.bin`;
 
 export const noteFile = (path: string): string => `${NOTES_DIR}/${path}`;
 export const trashFile = (name: string): string => `${TRASH_DIR}/${name}`;

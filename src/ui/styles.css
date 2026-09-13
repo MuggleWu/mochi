@@ -251,12 +251,19 @@ body {
 }
 
 /*
- * 内链：[[目标]]。M2 只渲染不跳转，所以**刻意做成"看得见但不是链接"**的样子 ——
- * 用下划线示意它是链接，但颜色弱于真正的外链，避免用户点不动还以为是坏的。
+ * 内链：[[目标]]。**现在可以点了**（跳转到目标笔记），所以做成真正链接的样子。
+ * 找不到目标时不改变外观 —— 解析结果只有点下去才知道，
+ * 而那之前就要给用户"这是可点的链接"的一致预期。
  */
 .reader .wikilink {
   color: var(--accent);
   border-bottom: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.reader .wikilink:active {
+  opacity: 0.55;
 }
 
 /* 渲染器就绪前的纯文本回退：保住换行语义，否则整篇会挤成一行 */
@@ -444,6 +451,31 @@ body {
 }
 
 .row .meta {
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+/* 正文命中的摘要：一行，命中词用 <mark> 标出来。
+   单行截断是刻意的：行高固定，虚拟滚动就不用做动态测高。 */
+.row .snippet {
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row .snippet mark {
+  background: transparent;
+  color: var(--fg);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 索引还在建时的提示：告诉用户"搜不到不是没有，是还没建好" */
+.index-hint {
+  margin: 0 10px 6px;
   font-size: 12px;
   color: var(--fg-dim);
 }

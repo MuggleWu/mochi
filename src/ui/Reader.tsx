@@ -1,12 +1,17 @@
 /**
- * 阅读态：markdown 渲染 + 公式。
+ * 阅读态：markdown 渲染 + 公式 + 内链跳转。
  *
  * 渲染是**异步就绪**的（管线懒加载，见 md.ts）。未就绪时先按纯文本显示 ——
  * 让用户立刻看到内容，而不是先看一个转圈。
+ *
+ * 内链跳转用**事件委托**（在容器上监听一次）而不是给每个 span 挂 onClick：
+ * 渲染结果是 `dangerouslySetInnerHTML` 塞进去的，React 管不到里面的节点，
+ * 每次重新渲染都要重新绑定；委托只绑一次，且新增的内链自动生效。
  */
 import { useEffect, useRef } from 'react';
 import { useNotes } from './store';
 import { useMarkdownRenderer } from './md';
+import { resolveWikilink } from './wikilink';
 
 interface Props {
   content: string;
@@ -18,6 +23,9 @@ export function Reader({ content, initialRatio, onRatioChange }: Props): React.J
   const ref = useRef<HTMLDivElement>(null);
   const renderer = useMarkdownRenderer();
   const html = renderer ? renderer.render(content) : '';
+  const openNote = useNotes((s) => s.openNote);
+  const order = useNotes((s) => s.order);
+  const setError = useNotes((s) => s.setError);
 
   useEffect(() => {
     const el = ref.current;
@@ -35,8 +43,22 @@ export function Reader({ content, initialRatio, onRatioChange }: Props): React.J
     onRatioChange(max > 0 ? el.scrollTop / max : 0);
   };
 
+  /** 点内链：解析出目标就跳，解析不出就明说，不要默默什么都不做。 */
+  const handleClick = (e: React.MouseEvent<HTMLDivElement>): void => {
+    const target = e.target as HTMLElement | null;
+    const span = target?.closest?.('[data-wikilink]');
+    if (!span) return;
+    const raw = span.getAttribute('data-wikilink') ?? '';
+    const hit = resolveWikilink(raw, order);
+    if (hit) {
+      void openNote(hit.path);
+      return;
+    }
+    setError(`内链指向的笔记不在仓库里：《${raw}》`);
+  };
+
   return (
-    <div className="reader" ref={ref} onScroll={handleScroll}>
+    <div className="reader" ref={ref} onScroll={handleScroll} onClick={handleClick}>
       {renderer ? (
         <div className="md" dangerouslySetInnerHTML={{ __html: html }} />
       ) : (

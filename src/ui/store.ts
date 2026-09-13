@@ -22,6 +22,9 @@ import { fetchSnapshot, reconcileSnapshot } from '@core/sync/pull-metadata';
 import { DEFAULT_SETTINGS, type Settings, isConfigured, loadSettings, saveSettings } from '@core/sync/settings';
 import { shouldSnapOpen } from './edge-swipe';
 import { DRAWER_SETTLE_MS } from './drawer-anim';
+import { search, type SearchIndex } from '@core/search/index';
+import { loadIndex, saveIndex, indexNotes, indexOne, type IndexNote } from '@core/search/store';
+import { mergeRows, snippetFor, type SearchRow } from './search-view';
 
 export type Mode = 'read' | 'edit';
 
@@ -52,7 +55,6 @@ export interface NotesState {
    * 因为关闭吸附的目标值**也是** -width，会撞上。
    */
   drawerEnterSeq: number;
-  query: string;
   /** 阅读位置（百分比），读写态切换时保持 */
   scrollRatio: number;
   error: string | null;
@@ -77,6 +79,15 @@ export interface NotesState {
   /** 正在单独拉取某一篇（L3 按需）。 */
   openingNote: boolean;
 
+  /** 当前搜索框里输入的内容。 */
+  query: string;
+  /** 搜索结果行（文件名命中在前，正文命中在后）。空查询时为空数组，列表退回全量 order。 */
+  rows: SearchRow[];
+  /** 全文索引里已收录的篇数，用于告诉用户"索引还在建"。 */
+  indexed: number;
+  /** 索引是否还在后台建（true 时正文搜索可能不全）。 */
+  indexing: boolean;
+
   init(store: FileStore): Promise<void>;
   saveConfig(next: Settings): Promise<void>;
   /** 拉取远端元数据（阶段一）：一个请求拿到全部笔记，不下载内容。 */
@@ -100,17 +111,65 @@ export interface NotesState {
   setDrawerWidth(width: number): void;
   /** 松手落定：按速度与位置决定开合，并滑到落点。 */
   settleDrawer(release?: { velocity: number; travelled: number }): void;
-  setQuery(q: string): void;
   setScrollRatio(r: number): void;
   dismissError(): void;
-  /** 当前可见（被搜索过滤）的笔记列表。 */
+  /** 主动报一个错（内链找不到目标、按需拉取失败等）。 */
+  setError(message: string | null): void;
+  /**
+   * 抽屉列表当前要渲染的路径。
+   *
+   * 空查询 → 全量（按修改时间倒序）；有查询 → 搜索结果（文件名命中在前，正文命中在后）。
+   */
   visible(): string[];
+  /**
+   * 搜索框内容变化。
+   *
+   * 文件名结果是**同步**出的（只查内存清单，零 IO），所以输入时立刻有反馈；
+   * 正文结果要读本地文件拿摘要，异步补上。
+   */
+  setSearchQuery(q: string): Promise<void>;
+  /** 把本地已下载的笔记灌进索引（冷启动后调用一次，后台跑）。 */
+  buildSearchIndex(): Promise<void>;
 }
 
 let store: FileStore | null = null;
 let repo: NotesRepo | null = null;
 /** 网络实现可注入，便于端到端自测（默认走真实 fetch）。 */
 let fetchImpl: FetchLike | undefined;
+
+/** 全文索引。放模块级而不是 state：它是几十 MB 的大对象，不该进渲染快照。 */
+let searchIndex: SearchIndex | null = null;
+/**
+ * 索引的改动计数：每次改动 +1。落盘后记下"写的是哪一版"。
+ *
+ * 为什么不用布尔值：落盘是异步的，写盘期间完全可能又改了一篇；用布尔值就没法区分
+ * "我写的就是最新版"和"我写的是旧版、期间又变了"，会把未落盘的改动误标成已保存。
+ */
+let indexVersion = 0;
+/** 已落盘的版本号。 */
+let indexSavedVersion = 0;
+/** 正在跑的那次"全量建索引"。并发触发时直接复用，不叠第二份。 */
+let indexRun: Promise<void> | null = null;
+/** 搜索的世代号：输入变化很快时，旧的异步结果不该覆盖新的。 */
+let searchGeneration = 0;
+/** 搜索结果条数上限。够用了：再多用户也不会滚到底，而且每多一条就多一次读盘拿摘要。 */
+const SEARCH_LIMIT = 100;
+
+/**
+ * 把索引落盘（有改动才写）。
+ *
+ * 单独抽出来给"低频但必须立刻持久化"的操作用（保存、改名、删除）：
+ * 这些操作之后如果进程被杀，索引里留着旧内容会搜出错的东西 —— 那比"搜索不全"更糟。
+ * 批量下载那条路径不用它（按批落盘即可，中断了重下就是）。
+ */
+async function flushIndex(): Promise<void> {
+  if (indexVersion === indexSavedVersion || !searchIndex || !store) return;
+  const snapshotStore = store;
+  const writing = indexVersion; // 记下"我正在写哪一版"
+  await saveIndex(snapshotStore, searchIndex);
+  // 写盘期间又改了，就不能把新改动标记成已保存
+  if (indexVersion === writing) indexSavedVersion = writing;
+}
 /** 内容拉取是否被要求暂停。放模块级：循环里每次都要读，且暂停必须在当前批次后立刻生效。 */
 let pullStopRequested = false;
 /**
@@ -141,6 +200,9 @@ export const useNotes = create<NotesState>((set, get) => ({
   drawerWidth: 0,
   drawerEnterSeq: 0,
   query: '',
+  rows: [],
+  indexed: 0,
+  indexing: false,
   scrollRatio: 0,
   error: null,
   toast: null,
@@ -187,6 +249,27 @@ export const useNotes = create<NotesState>((set, get) => ({
       settings,
       lastSyncNote: meta.lastSyncAt ? `上次同步 ${new Date(meta.lastSyncAt).toLocaleString()}` : '尚未同步过',
     });
+
+    // 索引：先同步读盘（几 MB，几十毫秒，这部分等得起），建索引则丢到后台。
+    // 为什么不在启动路径里建：一万篇实测十几秒，绝不能卡住"打开就能读"。
+    const loaded = await loadIndex(fs);
+    searchIndex = loaded.index;
+    set({ indexed: searchIndex.docIdOf.size });
+
+    if (!loaded.loaded) {
+      // 没有可用的索引文件 → 后台重建。期间按文件名搜索照常可用。
+      void get().buildSearchIndex();
+    } else {
+      // 索引里收录的篇数 < "本地真有内容的篇数" 才需要补。
+      // 注意不能拿"笔记总数"比：绝大多数笔记只有元数据（没下载内容），
+      // 拿总数比会导致每次启动都触发一次全量重建。
+      const withContent = Object.values(meta.notes).filter((e) => e.localSha !== '').length;
+      if (searchIndex.indexedSha.size < withContent) void get().buildSearchIndex();
+    }
+
+    // 已经配置过就直接同步一次（用户要的"打开即自动拉"）。
+    // 远端没动时 ETag 短路只要 0.8 秒，代价很小；没配置就什么都不做。
+    if (isConfigured(settings)) void get().pullMetadata();
   },
 
   async saveConfig(next) {
@@ -269,6 +352,10 @@ export const useNotes = create<NotesState>((set, get) => ({
     const { meta } = get();
     const entry = await repo.create(meta, '');
     const next = { ...meta, notes: { ...meta.notes, [entry.path]: entry } };
+    if (searchIndex) {
+      indexOne(searchIndex, { path: entry.path, content: '', sha: entry.localSha, hasContent: true });
+      indexVersion += 1;
+    }
     set({ meta: next, order: Object.keys(next.notes).sort(byMtimeDesc(next)), current: entry.path, content: '', mode: 'edit', dirty: true });
     await persistManifest(next);
   },
@@ -315,6 +402,10 @@ export const useNotes = create<NotesState>((set, get) => ({
       }
       get().setNoteEntry(saved);
       await persistManifest(get().meta);
+      if (searchIndex) {
+        indexOne(searchIndex, { path, content: text, sha: saved.localSha, hasContent: true });
+        indexVersion += 1;
+      }
       set({
         current: path,
         content: text,
@@ -353,7 +444,18 @@ export const useNotes = create<NotesState>((set, get) => ({
       flags: (previous?.flags ?? 0) | FLAG.DIRTY,
     };
     const next = { ...meta, notes: { ...meta.notes, [current]: merged } };
-    set({ meta: next, order: Object.keys(next.notes).sort(byMtimeDesc(next)), dirty: false, toast: '已保存' });
+    if (searchIndex) {
+      indexOne(searchIndex, { path: current, content, sha: merged.localSha, hasContent: true });
+      indexVersion += 1;
+      void flushIndex(); // 编辑是低频操作，可以立刻落盘
+    }
+    set({
+      meta: next,
+      order: Object.keys(next.notes).sort(byMtimeDesc(next)),
+      dirty: false,
+      toast: '已保存',
+      indexed: searchIndex?.indexedSha.size ?? 0,
+    });
     await persistManifest(next);
   },
 
@@ -450,21 +552,111 @@ export const useNotes = create<NotesState>((set, get) => ({
       set({ drawerOffset: null, drawerOpen: open });
     }, DRAWER_SETTLE_MS);
   },
-  setQuery(query) {
-    set({ query });
-  },
   setScrollRatio(scrollRatio) {
     set({ scrollRatio });
   },
   dismissError() {
     set({ error: null });
   },
+  setError(message) {
+    set({ error: message });
+  },
+
+  async setSearchQuery(query) {
+    set({ query });
+    const q = query.trim();
+    if (!q) {
+      set({ rows: [] });
+      return;
+    }
+    const generation = ++searchGeneration;
+    const nameHits = get()
+      .order.filter((p) => p.toLowerCase().includes(q.toLowerCase()))
+      .slice(0, SEARCH_LIMIT);
+
+    // 先只出文件名结果：这一步零 IO，敲字就有反馈
+    set({ rows: nameHits.map((path) => ({ path, kind: 'name' as const })) });
+
+    const { meta } = get();
+    const contentHits = searchIndex
+      ? search(searchIndex, q, {
+          mtimeOf: (path) => meta.notes[path]?.mtime ?? 0,
+          limit: SEARCH_LIMIT,
+        }).map((hit) => hit.path)
+      : [];
+
+    const content = contentHits.filter((p) => !nameHits.includes(p));
+    if (content.length === 0) return;
+
+    // 读命中笔记的正文来生成摘要。只读命中的那些（最多 SEARCH_LIMIT 篇），
+    // 不做全库扫描 —— 这正是"搜索零读盘"的边界：排序零读盘，展示摘要要读命中的几篇。
+    const snippets = new Map<string, { snippet: string; hl?: [number, number] }>();
+    if (repo) {
+      const want = new Set(content.slice(0, SEARCH_LIMIT));
+      await Promise.all(
+        [...want].map(async (path) => {
+          const text = await repo!.readTextIfPresent(path);
+          if (text !== null) snippets.set(path, snippetFor(text, q.split(/\s+/)[0] ?? q));
+        }),
+      );
+    }
+    if (generation !== searchGeneration) return; // 用户又敲了字，这批结果已经过期
+
+    set({
+      rows: mergeRows(
+        nameHits,
+        content,
+        (path) => snippets.get(path) ?? { snippet: '' },
+        SEARCH_LIMIT,
+      ),
+    });
+  },
+
+  async buildSearchIndex() {
+    if (!store) return;
+    if (indexRun) return indexRun; // 已经在建，别叠第二份
+    const run = (async (): Promise<void> => {
+      const started = Date.now();
+      if (!searchIndex) searchIndex = (await loadIndex(store!)).index;
+      const index = searchIndex;
+      const { meta, order } = get();
+      set({ indexing: true, indexed: index.docIdOf.size });
+
+      // 已下载内容的笔记才建索引。只有元数据的没有正文可索引。
+      const batch: IndexNote[] = [];
+      for (const path of order) {
+        const entry = meta.notes[path];
+        if (!entry || entry.localSha === '') continue;
+        const text = await repo?.readTextIfPresent(path);
+        if (text === null || text === undefined) continue;
+        batch.push({ path, content: text, sha: entry.localSha, hasContent: true });
+      }
+
+      if (batch.length > 0) {
+        indexNotes(index, batch);
+        indexVersion += 1;
+        await saveIndex(store!, index);
+        indexSavedVersion = indexVersion;
+      }
+      set({
+        indexing: false,
+        indexed: index.docIdOf.size,
+        lastSyncNote: get().lastSyncNote,
+      });
+      void started;
+    })();
+    indexRun = run;
+    try {
+      await run;
+    } finally {
+      indexRun = null;
+    }
+  },
 
   visible() {
-    const { order, query } = get();
-    const q = query.trim().toLowerCase();
-    if (!q) return order;
-    return order.filter((p) => p.toLowerCase().includes(q));
+    const { order, query, rows } = get();
+    if (!query.trim()) return order;
+    return rows.map((r) => r.path);
   },
 }));
 
@@ -530,6 +722,11 @@ async function doPullContent(options?: { limit?: number }): Promise<void> {
           const entry = await repo!.acceptRemote(path, content, remoteSha);
           if (!entry) return false;
           get().setNoteEntry(entry);
+          // 内容一落地就进索引：用户下完就能搜到，不必等整轮结束
+          if (searchIndex) {
+            indexOne(searchIndex, { path, content, sha: entry.localSha, hasContent: true });
+            indexVersion += 1;
+          }
           return true;
         },
         onProgress: (p) => {
@@ -547,6 +744,8 @@ async function doPullContent(options?: { limit?: number }): Promise<void> {
     }
 
     if (stale()) return; // 已被新一代取代，别把它的状态覆盖掉
+    // 索引按批落盘：逐篇写会伤闪存，而真中断了也只是重建一次
+    await flushIndex();
     const pending = pendingContentCount(get().meta);
     const stopped = pullStopRequested;
     set({

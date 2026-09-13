@@ -62,6 +62,16 @@ export class NotesRepo {
   }
 
   /**
+   * 只读正文，**不 stat 文件**。
+   *
+   * 给全文索引建索引用：那里要顺序读几千篇，而 `open()` 每篇都跟着一次 `list()`
+   * （桥调用约 9 ms/次），几千篇就是几十秒的额外开销，且索引根本不需要 size/mtime。
+   */
+  async readTextIfPresent(path: string): Promise<string | null> {
+    return this.store.readText(noteFile(path));
+  }
+
+  /**
    * 接受一篇**来自远端**的内容：写盘并直接置成"已同步"状态。
    *
    * 为什么不能复用 save()：save() 会把条目标成 DIRTY（那是给本地编辑用的），

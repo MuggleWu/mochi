@@ -151,25 +151,26 @@ describe('重命名与删除', () => {
   });
 });
 
-describe('搜索（当前只按文件名，零 IO）', () => {
-  it('过滤只走内存，不读文件', async () => {
-    const fs = await freshWith({
+describe('搜索', () => {
+  it('文件名命中最先出，只走内存不读文件', async () => {
+    await freshWith({
       'notes/读书笔记.md': 'x',
       'notes/会议记录.md': 'x',
       'notes/读后感想.md': 'x',
     });
 
-    const before = fs.readCalls;
-    useNotes.getState().setQuery('读');
+    const pending = useNotes.getState().setSearchQuery('读');
+    // 文件名那段是同步 set 的，await 之前就该能读到（这是"敲字即有反馈"的保证）
     const hits = useNotes.getState().visible();
     expect([...hits].sort()).toEqual(['读后感想.md', '读书笔记.md'].sort());
-    expect(fs.readCalls).toBe(before); // 搜索期间一次文件都没读
+    await pending;
   });
 
-  it('查询为空时返回全部', async () => {
-    await fresh();
-    useNotes.getState().setQuery('   ');
-    expect(useNotes.getState().visible()).toEqual([]);
+  it('查询为空时退回全量清单，而不是空列表', async () => {
+    await freshWith({ 'notes/a.md': 'x', 'notes/b.md': 'y' });
+    await useNotes.getState().setSearchQuery('   ');
+    expect(useNotes.getState().visible().sort()).toEqual(['a.md', 'b.md']);
+    expect(useNotes.getState().rows).toEqual([]);
   });
 });
 
