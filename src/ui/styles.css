@@ -355,6 +355,53 @@ body {
   transform: scale(0.96);
 }
 
+/*
+ * ── 上一篇 / 下一篇 ──────────────────────────────
+ * 贴着底边、左右分居两端：右边那个要避开右下角的圆形按钮，所以整条给右侧留了它的宽度。
+ * 只在阅读态出现（编辑态那两个位置要留给文字本身）。
+ */
+.note-nav {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(14px + var(--bottom-blocked, 0px));
+  display: flex;
+  justify-content: space-between;
+  padding: 0 84px 0 16px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.note-nav-btn {
+  pointer-events: auto;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 20px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 16%);
+  cursor: pointer;
+}
+
+.note-nav-btn:active {
+  transform: scale(0.94);
+}
+
+/* 到头了：留着位置（免得一按就跳），但明显不可用 */
+.note-nav-btn:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+
+.note-nav-btn:disabled:active {
+  transform: none;
+}
+
 /* ── 抽屉 ───────────────────────────────────────── */
 .scrim {
   position: absolute;

@@ -8,6 +8,7 @@ import { displayTitle, sanitizeNoteName } from '@core/paths';
 import { Drawer } from './Drawer';
 import { decideBack } from './back-stack';
 import { ContentBar } from './ContentBar';
+import { NoteNav } from './NoteNav';
 import { useEdgeSwipe } from './useEdgeSwipe';
 import { prefetchMarkdown } from './md';
 import { watchKeyboardHeight } from './viewport';
@@ -342,6 +343,7 @@ export function App({ store: injected }: AppProps = {}): React.JSX.Element {
       <ContentBar />
 
       <main className="main">
+        <NoteNav />
         {ready && !current && <EmptyReader />}
         {current && mode === 'read' && (
           <Reader

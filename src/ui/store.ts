@@ -155,6 +155,13 @@ export interface NotesState {
   setNoteEntry(entry: NoteEntry): void;
   createNote(): Promise<void>;
   openNote(path: string): Promise<void>;
+  /**
+   * 按列表顺序打开上一篇 / 下一篇。
+   *
+   * 顺序就是列表本身的顺序（最近改的在前），所以「下一篇」= 列表里往更早的方向走，
+   * 与用户在列表里往下滚的直觉一致。到头或没开笔记时什么也不做。
+   */
+  openNeighbor(direction: -1 | 1): Promise<void>;
   setContent(content: string): void;
   saveNote(): Promise<void>;
   renameNote(next: string): Promise<void>;
@@ -709,6 +716,17 @@ export const useNotes = create<NotesState>((set, get) => ({
     set({ meta: next, order: Object.keys(next.notes).sort(byMtimeDesc(next)), current: entry.path, content: '', mode: 'edit', dirty: true });
     await persistManifest(next);
     void get().saveSession(); // 新笔记马上就成了"当前在看的这篇"，状态要跟上去
+  },
+
+  async openNeighbor(direction: -1 | 1) {
+    const { order, current } = get();
+    if (!current) return;
+    const at = order.indexOf(current);
+    if (at < 0) return;
+    const target = order[at + direction];
+    // 到头了就什么也不做：按钮那边也会置灰，这里只是兜底
+    if (!target) return;
+    await get().openNote(target);
   },
 
   async openNote(path: string) {
