@@ -614,9 +614,16 @@ export const useNotes = create<NotesState>((set, get) => ({
       if (searchIndex.indexedSha.size < withContent) void get().buildSearchIndex();
     }
 
-    // 已经配置过就直接同步一次（用户要的"打开即自动拉"）。
-    // 远端没动时 ETag 短路只要 0.8 秒，代价很小；没配置就什么都不做。
-    if (isConfigured(settings)) void get().pullMetadata();
+    /*
+     * 已经配置过就自动同步一次（用户要的"打开即自动拉"）。
+     *
+     * **必须走 `syncNow` 而不是 `pullMetadata`**：两者差的是"版本历史整理"这一步，
+     * 而整理正是**列表顺序**的依据 —— 少了它，每篇都显示"时间未知"、顺序全乱。
+     *
+     * 这里曾经调的是 `pullMetadata`，于是那条路只在用户手动点「同步」时才通：
+     * 打开应用自动拉、但顺序永远是乱的。远端没动时 ETag 会短路成 0.8 秒，代价很小。
+     */
+    if (isConfigured(settings)) void get().syncNow();
   },
 
   async saveConfig(next) {

@@ -9,6 +9,7 @@ import { MemoryFileStore } from '@core/fs/memory-fs';
 import { MANIFEST_FILE } from '@core/fs/layout';
 import { FakeFetch } from '@core/net/fake-fetch';
 import { deserializeMeta, effectiveMtime, hasRealMtime } from '@core/sync/manifest';
+import { saveSettings } from '@core/sync/settings';
 import {
   useNotes,
   __abortContentPullForTest,
@@ -93,6 +94,41 @@ function historyFake(): FakeFetch {
   ]);
 }
 
+/**
+ * 让**正文下载全部撞额度墙**的假网络（历史端点照常工作）。
+ *
+ * 用来复现那个真实的饥饿场景：额度只有一份，正文下载（一篇一个请求）把它吃光，
+ * 历史整理（150 个请求）就一个文件清单都拿不到 —— 表现是整屏"时间未知"。
+ */
+/** 把两个假网络串起来：先看外层（截 blob），不匹配的交给内层。 */
+function withStarvedBlobs(inner: FakeFetch): FakeFetch {
+  return new FakeFetch([
+    {
+      match: /\/git\/blobs\/[^/]+$/,
+      responses: [{ text: '' }],
+      respond: (): Response =>
+        new Response(JSON.stringify({ message: 'API rate limit exceeded' }), {
+          status: 403,
+          headers: {
+            'content-type': 'application/json',
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 1800),
+          },
+        }),
+    },
+    { match: '', responses: [{ text: '' }], respond: (url, init) => inner.fetch(url, init) as unknown as Response },
+  ]);
+}
+
+/** 等到条件成立（或超时）。`init` 里那些 `void` 的任务只能这样等。 */
+async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('等超时了：条件一直没成立');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 const resetState = (): void => {
   useNotes.setState({
     ready: false,
@@ -143,12 +179,29 @@ describe('反推真实修改时间', () => {
      * 所以判据不是"最终能不能拿到时间"（那种测试即使顺序反了也会通过，因为后台
      * 终究会跑完），而是 **`syncNow()` 返回时时间有没有就位** —— 这才是用户看到的东西。
      */
-    const fake = historyFake();
+    /*
+     * 用"正文下载全撞额度墙"的假网络：这正是真机上发生的事。
+     * 历史整理必须**不受它影响**地跑完，否则就是整屏"时间未知"。
+     */
+    const fake = withStarvedBlobs(historyFake());
     __setFetchForTest(fake.fetch);
     const fs = new MemoryFileStore();
+    /*
+     * 只调 `init`，**不额外喊任何东西**。这就是用户打开应用时真正发生的事。
+     *
+     * 从前这条用例是手工再喊一次 `syncNow()`，于是**替应用把活干了**：它证明了
+     * "syncNow 内部顺序对"，却证明不了"启动会走到 syncNow"。而真正的 bug 恰在后者 ——
+     * 启动只拉清单、从不整理历史，所以每篇都显示"时间未知"、顺序全乱。
+     * 测试自己走一条应用不会走的路，比没有测试更糟。
+     *
+     * 第一次 `init` 是"装上还没配"的状态（什么都不做），存好配置后的第二次 `init`
+     * 才是真正要测的——"配置还在，打开应用"。
+     */
     await useNotes.getState().init(fs);
-    await useNotes.getState().saveConfig({ repo: 'owner/repo', branch: 'master', token: 'ok' });
-    await useNotes.getState().syncNow();
+    await saveSettings(fs, { repo: 'owner/repo', branch: 'master', token: 'ok' });
+    await useNotes.getState().init(fs);
+    // `init` 是 `void syncNow()`，不等待。等它转到"整理历史"那一步并跑完。
+    await waitFor(() => useNotes.getState().histNote !== '');
 
     // 刻意**不** await 任何后台任务：就是要看这一刻的状态
     const s = useNotes.getState();
