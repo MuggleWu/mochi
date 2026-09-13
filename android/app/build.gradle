@@ -8,9 +8,12 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // 与 package.json 的 version 手工对齐（Capacitor 不会自动同步这两个值）。
-        // versionCode 每次出包必须递增，否则新包装不上（Android 会拒绝降级安装）。
-        versionCode 2
-        versionName "0.2.0"
+        //
+        // versionCode 每次出包**必须递增**：Android 拒绝安装 versionCode 相同或更低的包，
+        // 所以忘了递增的后果不是"版本号难看"，而是**新包根本装不上去**，除非先卸载
+        // （卸载会连本地笔记一起清掉）。曾经连续 7 个包都是 versionCode 2，等于白出。
+        versionCode 3
+        versionName "0.2.6"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
